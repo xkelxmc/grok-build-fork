@@ -286,6 +286,9 @@ impl MvpAgent {
             parent_compaction: crate::session::CompactionPins::default(),
             auto_compact_threshold_tiers:
                 crate::agent::subagent::AutoCompactThresholdTiers::capture(&self.cfg.borrow()),
+            auto_compact_enabled: crate::util::config::resolve_auto_compact_enabled(
+                &self.cfg.borrow(),
+            ),
             hunk_tracker_handle,
             hunk_tracking_enabled,
             fs,

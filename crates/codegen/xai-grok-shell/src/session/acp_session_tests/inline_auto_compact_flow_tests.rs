@@ -129,6 +129,7 @@ async fn create_test_actor(
         forked_tool_override: None,
         compaction: crate::session::compaction_config::CompactionConfig {
             threshold_percent: std::cell::Cell::new(threshold_percent),
+            enabled: std::cell::Cell::new(true),
             force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             context_window_override: None,
             count: std::sync::atomic::AtomicU64::new(0),
@@ -318,6 +319,26 @@ async fn test_should_auto_compact_below_threshold() {
             let result =
                 actor.should_auto_compact(84_000, std::num::NonZeroU64::new(100_000).unwrap());
             assert!(result.is_none(), "Should NOT trigger at 84%");
+        })
+        .await;
+}
+/// `[session] auto_compact = false` must skip threshold-based auto-compact.
+#[tokio::test(flavor = "current_thread")]
+async fn test_should_auto_compact_disabled_master_switch() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) =
+                mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(95_000, 100_000, 85, gateway_tx, persistence_tx).await;
+            actor.compaction.enabled.set(false);
+            let result =
+                actor.should_auto_compact(95_000, std::num::NonZeroU64::new(100_000).unwrap());
+            assert!(
+                result.is_none(),
+                "auto_compact=false must not trigger at 95%"
+            );
         })
         .await;
 }
@@ -552,6 +573,7 @@ async fn create_test_actor_with_memory(
         forked_tool_override: None,
         compaction: crate::session::compaction_config::CompactionConfig {
             threshold_percent: std::cell::Cell::new(threshold_percent),
+            enabled: std::cell::Cell::new(true),
             force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             context_window_override: None,
             count: std::sync::atomic::AtomicU64::new(0),

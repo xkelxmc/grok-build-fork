@@ -171,6 +171,9 @@ impl SessionActor {
     }
     /// Per-turn prefire decision: usage has reached `threshold - lead` (so there is still runway before the hard auto-compact line at `threshold`).
     pub(crate) async fn should_prefire_two_pass(&self) -> bool {
+        if !self.compaction.enabled.get() {
+            return false;
+        }
         if self.compaction.is_suppressed() {
             return false;
         }
@@ -1881,6 +1884,9 @@ impl SessionActor {
         total_tokens: u64,
         context_window: std::num::NonZeroU64,
     ) -> Option<AutoCompactTriggerInfo> {
+        if !self.compaction.enabled.get() {
+            return None;
+        }
         let cw = context_window.get();
         if xai_token_estimation::exceeds_threshold(
             total_tokens,
@@ -1904,6 +1910,9 @@ impl SessionActor {
         &self,
         err: &xai_grok_sampler::SamplingErrorInfo,
     ) -> bool {
+        if !self.compaction.enabled.get() {
+            return false;
+        }
         if self.compaction.is_suppressed() {
             return false;
         }
@@ -1932,6 +1941,9 @@ impl SessionActor {
     /// Uses `get_estimated_total_tokens()` (exact prior count plus a byte-estimate of items since last response) so tool results are accounted for.
     /// Returns `None` when `is_flushing`.
     pub(crate) async fn check_auto_compact_needed(&self) -> Option<AutoCompactTriggerInfo> {
+        if !self.compaction.enabled.get() {
+            return None;
+        }
         if self
             .memory
             .is_flushing
@@ -1988,6 +2000,9 @@ impl SessionActor {
     }
     /// Returns `Some` when tool call outputs have pushed the estimated token count past the context window, so pre-emptive compaction is needed.
     pub(crate) async fn check_preflight_overflow(&self) -> Option<AutoCompactTriggerInfo> {
+        if !self.compaction.enabled.get() {
+            return None;
+        }
         if self.compaction.is_suppressed() {
             return None;
         }

@@ -33,7 +33,7 @@ Compress conversation history to reclaim context-window space. Pass a note to te
 /compact keep the auth implementation details
 ```
 
-Grok also auto-compacts once the context window hits 85% (tune it with `[session] auto_compact_threshold_percent`).
+Grok also auto-compacts once the context window hits 85% (tune it with `[session] auto_compact_threshold_percent`, or disable with `[session] auto_compact = false`).
 
 ### `/context`
 

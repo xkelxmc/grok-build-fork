@@ -97,6 +97,7 @@ remote_fetch = true                    # allow optional online model-catalog fet
                                        # managed-config sync has its own switch: managed_config)
 
 [session]
+auto_compact = true                    # automatic compaction (default: true); false keeps /compact
 auto_compact_threshold_percent = 85    # auto-compact at this % of context window (default: 85)
 load_envrc = true                      # load .envrc environment variables
 
@@ -779,6 +780,7 @@ The key ones. See the README for the complete list.
 | Variable | Description |
 |----------|-------------|
 | `GROK_MEMORY` | Enable (`1`) or disable (`0`) cross-session memory |
+| `GROK_AUTO_COMPACT` | Enable (`1`/`true`/`on`) or disable (`0`/`false`/`off`) automatic compaction. Same as `[session] auto_compact`. Manual `/compact` still works. |
 | `GROK_SUBAGENTS` | Enable (`1`) or disable (`0`) subagents |
 | `GROK_WORKFLOWS` | Enable (`1`) or disable (`0`) background workflows and select the `/goal` driver (default on: host-owned workflow driver; off: legacy `update_goal`) |
 | `GROK_WEB_FETCH` | Enable (`1`) or disable (`0`) the web_fetch tool |

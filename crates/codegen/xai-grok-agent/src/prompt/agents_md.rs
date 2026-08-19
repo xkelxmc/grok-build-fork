@@ -21,19 +21,47 @@ pub struct AgentConfigFile {
     pub content: String,
 }
 
+fn is_agents_instruction_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("AGENTS.md") || name.eq_ignore_ascii_case("AGENT.md")
+}
+
+fn is_claude_instruction_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.eq_ignore_ascii_case("CLAUDE.md") || name.eq_ignore_ascii_case("CLAUDE.local.md")
+        })
+}
+
+/// Find matching agent config files in a directory.
+///
 /// `filenames` is the (compat-gated) recognized list, precomputed once by the caller so the cwd-to-root walk doesn't re-allocate it per directory.
 /// When all compat cells are on it equals the legacy `AGENT_FILENAMES` list exactly.
+///
+/// If this directory already has a Claude-named file, sibling AGENTS.md /
+/// AGENT.md are dropped so the same handbook is not injected twice.
 fn find_agent_files(dir: &Path, filenames: &[&str]) -> Vec<PathBuf> {
-    filenames
+    let mut files: Vec<PathBuf> = filenames
         .iter()
         .filter_map(|name| {
             let path = dir.join(name);
             path.exists().then_some(path)
         })
-        .collect()
+        .collect();
+    if files.iter().any(|path| is_claude_instruction_path(path)) {
+        files.retain(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_none_or(|name| !is_agents_instruction_name(name))
+        });
+    }
+    files
 }
 
-/// Find `*.md` files in `.grok/rules/`, `.claude/rules/`, and `.cursor/rules/`, sorted alphabetically.
+/// Find `*.md` files in `.grok/rules/`, `.claude/rules/`, and `.cursor/rules/`,
+/// recursively, sorted per directory. Path-scoped files (`paths:` / `globs:`)
+/// are still discovered here and dropped when the content is loaded, so
+/// session start keeps always-on rules only.
 /// `rules_subdirs` is the (compat-gated) list, precomputed once by the caller so the walk doesn't re-allocate it per directory.
 fn find_rules_files(dir: &Path, rules_subdirs: &[&str]) -> Vec<PathBuf> {
     let mut results = Vec::new();
@@ -42,20 +70,42 @@ fn find_rules_files(dir: &Path, rules_subdirs: &[&str]) -> Vec<PathBuf> {
         if !rules_dir.is_dir() {
             continue;
         }
-        let mut entries: Vec<PathBuf> = match std::fs::read_dir(&rules_dir) {
-            Ok(iter) => iter
-                .filter_map(|entry| entry.ok())
-                .map(|e| e.path())
-                .filter(|p| {
-                    p.extension()
-                        .and_then(|ext| ext.to_str())
-                        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
-                })
-                .collect(),
-            Err(_) => continue,
+        results.extend(collect_md_files_recursive(&rules_dir));
+    }
+    results
+}
+
+fn collect_md_files_recursive(rules_dir: &Path) -> Vec<PathBuf> {
+    let mut results = Vec::new();
+    let mut stack = vec![rules_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(iter) = std::fs::read_dir(&dir) else {
+            continue;
         };
-        entries.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
-        results.extend(entries);
+        let mut dirs = Vec::new();
+        let mut files = Vec::new();
+        for entry in iter.filter_map(|entry| entry.ok()) {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                dirs.push(path);
+            } else if path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+            {
+                // Include symlink-to-file `.md` (is_file() is false for the
+                // symlink itself). Do not follow symlink dirs — is_dir()
+                // above is only true for real directories.
+                files.push(path);
+            }
+        }
+        dirs.sort();
+        files.sort();
+        stack.extend(dirs.into_iter().rev());
+        results.extend(files);
     }
     results
 }
@@ -282,6 +332,11 @@ async fn read_agents_config_with_roots(
         .filter_map(|candidate| {
             let content = std::fs::read_to_string(&candidate.path).ok()?;
             let content = if candidate.is_rule {
+                if xai_grok_tools::implementations::cursor_rules_on_read::is_path_scoped_rule(
+                    &content,
+                ) {
+                    return None;
+                }
                 xai_grok_tools::implementations::skills::skill::extract_skill_body(&content)
             } else {
                 content
@@ -393,7 +448,54 @@ mod tests {
         }
 
         let files = find_agent_files(tmp.path(), &filenames);
-        assert_eq!(files.len(), filenames.len());
+        assert!(
+            files.iter().any(|f| is_claude_instruction_path(f)),
+            "Claude-named files must still be discovered, got: {files:?}"
+        );
+        assert!(
+            files.iter().all(|f| {
+                f.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_none_or(|name| !is_agents_instruction_name(name))
+            }),
+            "sibling AGENTS.md must be dropped when Claude.md exists, got: {files:?}"
+        );
+    }
+
+    #[test]
+    fn find_agent_files_keeps_agents_md_when_no_claude_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("AGENTS.md"), "# Agents only").unwrap();
+
+        let files = find_agent_files(tmp.path(), &CompatConfig::default().agent_filenames());
+        assert!(
+            files.iter().any(|f| f
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(is_agents_instruction_name)),
+            "AGENTS.md must load when no Claude.md is present, got: {files:?}"
+        );
+    }
+
+    #[test]
+    fn find_agent_files_drops_agents_md_when_claude_md_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("AGENTS.md"), "# Agents").unwrap();
+        fs::write(tmp.path().join("Claude.md"), "# Claude").unwrap();
+
+        let files = find_agent_files(tmp.path(), &CompatConfig::default().agent_filenames());
+        assert!(
+            files.iter().any(|f| is_claude_instruction_path(f)),
+            "Claude.md must remain, got: {files:?}"
+        );
+        assert!(
+            files.iter().all(|f| {
+                f.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_none_or(|name| !is_agents_instruction_name(name))
+            }),
+            "AGENTS.md must not load next to Claude.md, got: {files:?}"
+        );
     }
 
     #[test]
@@ -440,6 +542,18 @@ mod tests {
         assert_eq!(files.len(), 2);
         assert!(files[0].to_string_lossy().contains("safety.md"));
         assert!(files[1].to_string_lossy().contains("style.md"));
+    }
+
+    #[test]
+    fn find_rules_files_discovers_nested_claude_rules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nested = tmp.path().join(".claude/rules/coding");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("db.md"), "# Nested").unwrap();
+
+        let files = find_rules_files(tmp.path(), &CompatConfig::default().rules_dirs());
+        assert_eq!(files.len(), 1);
+        assert!(files[0].to_string_lossy().contains("coding/db.md"));
     }
 
     // ── format_agents_md_section tests ──────────────────────────────
@@ -673,6 +787,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn grok_home_agents_md_loads_when_no_claude_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let grok_home = tmp.path().join("custom-grok-home");
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(grok_home.join("rules")).unwrap();
+        fs::create_dir_all(&repo).unwrap();
+        init_git_repo(&repo);
+        fs::write(grok_home.join("AGENTS.md"), "grok-home-agents").unwrap();
+
+        let configs = read_agents_config_with_roots(
+            repo.to_str().unwrap(),
+            None,
+            CompatConfig::default(),
+            grok_home,
+            None,
+        )
+        .await;
+        assert!(
+            configs
+                .iter()
+                .any(|config| config.content.contains("grok-home-agents")),
+            " ~/.grok/AGENTS.md must still load, got: {configs:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn vendor_home_agents_and_rules_cells_are_independent() {
         let tmp = tempfile::tempdir().unwrap();
         let grok_home = tmp.path().join("grok-home");
@@ -853,7 +993,7 @@ mod tests {
         init_git_repo(&repo);
         fs::write(
             repo.join("AGENTS.md"),
-            "---\nglobs: ['*.rs']\n---\ncanonical-collision-body",
+            "---\ndescription: collision\n---\ncanonical-collision-body",
         )
         .unwrap();
         std::os::unix::fs::symlink("../AGENTS.md", repo.join("rules/alias.md")).unwrap();
@@ -890,7 +1030,8 @@ mod tests {
         fs::create_dir_all(repo.join(".cursor/rules")).unwrap();
         init_git_repo(&repo);
 
-        let frontmatter = |body: &str| format!("---\nglobs: ['*.rs']\n---\n{body}");
+        let scoped = |body: &str| format!("---\nglobs: ['*.rs']\n---\n{body}");
+        let always_on = |body: &str| format!("---\ndescription: always\n---\n{body}");
         for (path, body) in [
             (grok_home.join("rules/global.md"), "custom-home-body"),
             (home.join(".claude/rules/global.md"), "claude-body"),
@@ -899,9 +1040,14 @@ mod tests {
             (repo.join(".claude/rules/project.md"), "claude-project-body"),
             (repo.join(".cursor/rules/project.md"), "cursor-project-body"),
         ] {
-            fs::write(path, frontmatter(body)).unwrap();
+            fs::write(&path, always_on(body)).unwrap();
         }
-        fs::write(repo.join("AGENTS.md"), frontmatter("named-body")).unwrap();
+        fs::write(
+            repo.join(".claude/rules/scoped.md"),
+            scoped("claude-scoped-body"),
+        )
+        .unwrap();
+        fs::write(repo.join("AGENTS.md"), scoped("named-body")).unwrap();
 
         let configs = read_agents_config_with_roots(
             repo.to_str().unwrap(),
@@ -926,12 +1072,57 @@ mod tests {
                 .unwrap();
             assert_eq!(config.content, body);
         }
+        assert!(
+            configs
+                .iter()
+                .all(|config| !config.content.contains("claude-scoped-body")),
+            "path-scoped rules must not enter session start: {configs:?}"
+        );
         let named = configs
             .iter()
             .find(|config| config.content.contains("named-body"))
             .unwrap();
         assert!(named.content.starts_with("---\n"));
         assert!(named.content.contains("globs:"));
+    }
+
+    #[tokio::test]
+    async fn nested_always_on_rules_are_included_at_session_start() {
+        let tmp = tempfile::tempdir().unwrap();
+        let grok_home = tmp.path().join("custom-grok-home");
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(grok_home.join("rules")).unwrap();
+        fs::create_dir_all(repo.join(".claude/rules/repository")).unwrap();
+        init_git_repo(&repo);
+        fs::write(
+            repo.join(".claude/rules/repository/catches.md"),
+            "# Catches\nalways-on-nested",
+        )
+        .unwrap();
+        fs::write(
+            repo.join(".claude/rules/repository/db.md"),
+            "---\npaths:\n  - 'packages/db-driver/prisma/**'\n---\npath-scoped-nested",
+        )
+        .unwrap();
+
+        let configs = read_agents_config_with_roots(
+            repo.to_str().unwrap(),
+            None,
+            CompatConfig::default(),
+            grok_home,
+            None,
+        )
+        .await;
+        assert!(
+            configs
+                .iter()
+                .any(|config| config.content.contains("always-on-nested"))
+        );
+        assert!(
+            configs
+                .iter()
+                .all(|config| !config.content.contains("path-scoped-nested"))
+        );
     }
 
     #[tokio::test]

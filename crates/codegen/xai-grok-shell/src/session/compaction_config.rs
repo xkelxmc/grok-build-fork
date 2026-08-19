@@ -159,6 +159,8 @@ pub(crate) struct CompactionConfig {
     /// Context window usage percentage (0-100) at which auto-compact triggers.
     /// `Cell` so the value can be re-resolved at model-switch time without holding `&mut self` on the actor.
     pub threshold_percent: Cell<u8>,
+    /// Master switch for automatic compaction. Manual `/compact` ignores it.
+    pub enabled: Cell<bool>,
     /// Debug: when set, next auto-compact check triggers unconditionally.
     pub force_compact: Arc<AtomicBool>,
     /// Auto-compaction suppression state (`SUPPRESS_*`) after a deterministic failure; the gates early-return unless `SUPPRESS_NONE`.

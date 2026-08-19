@@ -1500,6 +1500,7 @@ pub(crate) async fn run_shell_child(
         },
         xai_grok_workspace::permission::ClientType::Generic,
         auto_compact_threshold_percent,
+        ctx.auto_compact_enabled,
         xai_grok_agent::DEFAULT_SYSTEM_PROMPT_LABEL.to_string(),
         pins.mode,
         ctx.resolve_compaction_verbatim_input(),

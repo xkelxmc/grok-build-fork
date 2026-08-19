@@ -1,0 +1,182 @@
+#!/bin/sh
+# Launch the local grok-build fork. Official ~/.grok/bin/grok stays untouched.
+# Prompt when public xai-org/grok-build SOURCE_REV differs from
+# fork/base-source-rev. The official binary hash is irrelevant — we cannot
+# rebase onto a commit that is not in the public dump.
+# Never block startup on the network: use the cache / local SOURCE_REV
+# immediately, curl xai-org in the background, warn on the next launch.
+
+set -eu
+
+# Allow tests to pin these before sourcing.
+if [ -z "${FORK_DIR:-}" ]; then
+  FORK_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+fi
+if [ -z "${ROOT_DIR:-}" ]; then
+  ROOT_DIR=$(CDPATH= cd -- "$FORK_DIR/.." && pwd)
+fi
+BIN="${GROK_FORK_BIN:-$ROOT_DIR/target/release/xai-grok-pager}"
+BASE_REV_FILE="${GROK_FORK_BASE_REV_FILE:-$FORK_DIR/base-source-rev}"
+GIT_DIR="${GROK_FORK_GIT_DIR:-$ROOT_DIR}"
+PUBLIC_CACHE_FILE="${GROK_HOME:-$HOME/.grok}/fork-public-source-rev"
+CACHE_TTL_SECS="${GROK_FORK_CHECK_TTL:-300}"
+SOURCE_REV_URL="${GROK_FORK_SOURCE_REV_URL:-https://raw.githubusercontent.com/xai-org/grok-build/main/SOURCE_REV}"
+
+trim() {
+  printf '%s' "$1" | tr -d ' \t\r\n'
+}
+
+# Full monorepo SHA from SOURCE_REV. Rejects leftover Cargo.toml versions
+# such as "1.0.5" in the previous cache file.
+is_source_rev() {
+  case $1 in
+    *[!0-9a-fA-F]* | "") return 1 ;;
+  esac
+  [ "${#1}" -eq 40 ]
+}
+
+skip_network() {
+  [ "${GROK_FORK_SKIP_NETWORK:-${GROK_FORK_SKIP_GIT_FETCH:-0}}" != "0" ]
+}
+
+read_base_source_rev() {
+  if [ ! -f "$BASE_REV_FILE" ]; then
+    printf '%s\n' "fork/base-source-rev is missing: $BASE_REV_FILE" >&2
+    return 1
+  fi
+  trim "$(cat "$BASE_REV_FILE")"
+}
+
+read_local_source_rev() {
+  if [ -f "$GIT_DIR/SOURCE_REV" ]; then
+    trim "$(cat "$GIT_DIR/SOURCE_REV")"
+  fi
+}
+
+fetch_public_source_rev() {
+  if skip_network; then
+    return 0
+  fi
+  curl -fsS --max-time 8 "$SOURCE_REV_URL" 2>/dev/null | trim
+}
+
+write_public_source_cache() {
+  _wc_now=$1
+  _wc_rev=$2
+  if ! is_source_rev "$_wc_rev"; then
+    return 0
+  fi
+  mkdir -p "$(dirname -- "$PUBLIC_CACHE_FILE")"
+  _wc_tmp="${PUBLIC_CACHE_FILE}.tmp.$$"
+  printf '%s\n%s\n' "$_wc_now" "$_wc_rev" >"$_wc_tmp"
+  mv "$_wc_tmp" "$PUBLIC_CACHE_FILE"
+}
+
+cache_is_fresh() {
+  _cf_checked_at=$1
+  _cf_now=$2
+  case $_cf_checked_at in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  _cf_age=$((_cf_now - _cf_checked_at))
+  [ "$_cf_age" -ge 0 ] && [ "$_cf_age" -lt "$CACHE_TTL_SECS" ]
+}
+
+schedule_public_source_refresh() {
+  if skip_network; then
+    return 0
+  fi
+  _sr_lock="${PUBLIC_CACHE_FILE}.fetching"
+  if ! mkdir "$_sr_lock" 2>/dev/null; then
+    return 0
+  fi
+  (
+    _sr_rev=$(fetch_public_source_rev)
+    if is_source_rev "$_sr_rev"; then
+      write_public_source_cache "$(date +%s)" "$_sr_rev"
+    fi
+    rmdir "$_sr_lock" 2>/dev/null || true
+  ) >/dev/null 2>&1 &
+}
+
+cached_public_source_rev() {
+  _cp_now=$(date +%s)
+  _cp_cached=
+  _cp_checked_at=
+  if [ -f "$PUBLIC_CACHE_FILE" ]; then
+    _cp_checked_at=$(sed -n '1p' "$PUBLIC_CACHE_FILE")
+    _cp_cached=$(trim "$(sed -n '2p' "$PUBLIC_CACHE_FILE")")
+  fi
+  if is_source_rev "$_cp_cached"; then
+    if ! cache_is_fresh "$_cp_checked_at" "$_cp_now"; then
+      schedule_public_source_refresh
+    fi
+    printf '%s' "$_cp_cached"
+    return
+  fi
+  _cp_latest=$(read_local_source_rev)
+  schedule_public_source_refresh
+  write_public_source_cache "$_cp_now" "$_cp_latest"
+  printf '%s' "$_cp_latest"
+}
+
+is_interactive() {
+  if [ "${GROK_FORK_ASSUME_TTY:-0}" != "0" ]; then
+    return 0
+  fi
+  [ -t 0 ] && [ -t 2 ]
+}
+
+maybe_warn_about_upstream() {
+  if [ "${GROK_FORK_SKIP_UPDATE_CHECK:-0}" != "0" ]; then
+    return 0
+  fi
+
+  base=$(read_base_source_rev) || exit 1
+  public=$(cached_public_source_rev)
+
+  if [ -z "$public" ] || [ "$public" = "$base" ]; then
+    return 0
+  fi
+
+  printf '\n' >&2
+  printf 'Public grok-build SOURCE_REV is %s (this fork is pinned to %s).\n' "$public" "$base" >&2
+  printf 'Fetch xai-org/grok-build, rebase the patch branch, bump fork/base-source-rev.\n' >&2
+
+  if ! is_interactive; then
+    printf 'Non-interactive session — starting the old fork build.\n\n' >&2
+    return 0
+  fi
+
+  printf 'Run the old fork build anyway? [Y/n] ' >&2
+  if ! read -r answer; then
+    printf '\nStopped.\n' >&2
+    exit 1
+  fi
+  case $answer in
+    '' | Y | y | yes | YES) ;;
+    *)
+      printf 'Stopped. Official binary is still at ~/.grok/bin/grok\n' >&2
+      exit 1
+      ;;
+  esac
+}
+
+require_binary() {
+  if [ ! -x "$BIN" ]; then
+    printf '%s\n' "Fork binary is missing: $BIN" >&2
+    printf '%s\n' "Build it: cargo build -p xai-grok-pager-bin --release" >&2
+    printf '%s\n' "Working tree: $ROOT_DIR" >&2
+    exit 127
+  fi
+}
+
+grok_fork_main() {
+  require_binary
+  maybe_warn_about_upstream
+  exec "$BIN" "$@"
+}
+
+if [ "${GROK_FORK_SOURCED:-0}" != 1 ]; then
+  grok_fork_main "$@"
+fi

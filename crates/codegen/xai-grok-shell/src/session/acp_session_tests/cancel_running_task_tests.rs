@@ -185,6 +185,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 forked_tool_override: None,
                 compaction: crate::session::compaction_config::CompactionConfig {
                     threshold_percent: std::cell::Cell::new(85),
+                    enabled: std::cell::Cell::new(true),
                     force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     context_window_override: None,
                     count: std::sync::atomic::AtomicU64::new(0),
@@ -791,6 +792,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 forked_tool_override: None,
                 compaction: crate::session::compaction_config::CompactionConfig {
                     threshold_percent: std::cell::Cell::new(85),
+                    enabled: std::cell::Cell::new(true),
                     force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     context_window_override: None,
                     count: std::sync::atomic::AtomicU64::new(0),
@@ -1117,6 +1119,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 forked_tool_override: None,
                 compaction: crate::session::compaction_config::CompactionConfig {
                     threshold_percent: std::cell::Cell::new(85),
+                    enabled: std::cell::Cell::new(true),
                     force_compact: std::sync::Arc::new(
                         std::sync::atomic::AtomicBool::new(false),
                     ),
@@ -2694,6 +2697,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 forked_tool_override: None,
                 compaction: crate::session::compaction_config::CompactionConfig {
                     threshold_percent: std::cell::Cell::new(85),
+                    enabled: std::cell::Cell::new(true),
                     force_compact: std::sync::Arc::new(
                         std::sync::atomic::AtomicBool::new(false),
                     ),
