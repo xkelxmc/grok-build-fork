@@ -44,7 +44,12 @@ read_base_source_rev() {
     printf '%s\n' "fork/base-source-rev is missing: $BASE_REV_FILE" >&2
     return 1
   fi
-  trim "$(cat "$BASE_REV_FILE")"
+  _base_rev=$(trim "$(cat "$BASE_REV_FILE")")
+  if ! is_source_rev "$_base_rev"; then
+    printf '%s\n' "fork/base-source-rev is not a 40-char SOURCE_REV: $BASE_REV_FILE" >&2
+    return 1
+  fi
+  printf '%s' "$_base_rev"
 }
 
 read_local_source_rev() {
@@ -66,10 +71,15 @@ write_public_source_cache() {
   if ! is_source_rev "$_wc_rev"; then
     return 0
   fi
-  mkdir -p "$(dirname -- "$PUBLIC_CACHE_FILE")"
+  # Best-effort: a read-only GROK_HOME must not block launching grok.
+  mkdir -p "$(dirname -- "$PUBLIC_CACHE_FILE")" 2>/dev/null || return 0
   _wc_tmp="${PUBLIC_CACHE_FILE}.tmp.$$"
-  printf '%s\n%s\n' "$_wc_now" "$_wc_rev" >"$_wc_tmp"
-  mv "$_wc_tmp" "$PUBLIC_CACHE_FILE"
+  if ! printf '%s\n%s\n' "$_wc_now" "$_wc_rev" >"$_wc_tmp" 2>/dev/null; then
+    rm -f "$_wc_tmp"
+    return 0
+  fi
+  mv "$_wc_tmp" "$PUBLIC_CACHE_FILE" 2>/dev/null || rm -f "$_wc_tmp"
+  return 0
 }
 
 cache_is_fresh() {

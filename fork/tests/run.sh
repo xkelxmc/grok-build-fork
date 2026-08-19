@@ -76,6 +76,15 @@ printf '%s\n' "$PIN_REV" >"$WORKDIR/base-source-rev"
 BASE_REV_FILE="$WORKDIR/base-source-rev"
 assert_eq "read_base_source_rev" "$(read_base_source_rev)" "$PIN_REV"
 
+printf '1.0.5\n' >"$WORKDIR/base-source-rev-bad"
+BASE_REV_FILE="$WORKDIR/base-source-rev-bad"
+if read_base_source_rev >/dev/null 2>&1; then
+  fail "read_base_source_rev rejects cargo-version pin"
+else
+  pass "read_base_source_rev rejects cargo-version pin"
+fi
+BASE_REV_FILE="$WORKDIR/base-source-rev"
+
 mkdir -p "$WORKDIR/src-same" "$WORKDIR/src-newer"
 printf '%s\n' "$PIN_REV" >"$WORKDIR/src-same/SOURCE_REV"
 printf '%s\n' "$NEWER_REV" >"$WORKDIR/src-newer/SOURCE_REV"
@@ -95,6 +104,7 @@ assert_eq "cached_public_source_rev uses fresh cache" "$(cached_public_source_re
 
 printf '0\n%s\n' "$PIN_REV" >"$PUBLIC_CACHE_FILE"
 GIT_DIR="$WORKDIR/not-a-repo"
+GROK_FORK_SKIP_NETWORK=1
 assert_eq "cached_public_source_rev returns stale cache without blocking" "$(cached_public_source_rev)" "$PIN_REV"
 
 rm -f "$PUBLIC_CACHE_FILE"
@@ -106,6 +116,14 @@ printf '%s\n1.0.5\n' "$(date +%s)" >"$PUBLIC_CACHE_FILE"
 GIT_DIR="$WORKDIR/src-same"
 GROK_FORK_SKIP_NETWORK=1
 assert_eq "cached_public_source_rev ignores cargo-version cache" "$(cached_public_source_rev)" "$PIN_REV"
+
+PUBLIC_CACHE_FILE="$GROK_HOME/blocked-dir/fork-public-source-rev"
+printf 'x\n' >"$GROK_HOME/blocked-dir"
+GIT_DIR="$WORKDIR/src-same"
+GROK_FORK_SKIP_NETWORK=1
+assert_eq "cached_public_source_rev survives cache mkdir failure" "$(cached_public_source_rev)" "$PIN_REV"
+PUBLIC_CACHE_FILE="$GROK_HOME/fork-public-source-rev"
+rm -f "$GROK_HOME/blocked-dir"
 
 FAKE_BIN="$WORKDIR/fake-grok"
 cat >"$FAKE_BIN" <<'EOF'

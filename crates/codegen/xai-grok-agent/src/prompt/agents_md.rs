@@ -28,9 +28,19 @@ fn is_agents_instruction_name(name: &str) -> bool {
 fn is_claude_instruction_path(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| {
-            name.eq_ignore_ascii_case("CLAUDE.md") || name.eq_ignore_ascii_case("CLAUDE.local.md")
-        })
+        .is_some_and(is_claude_instruction_name)
+}
+
+fn is_direct_child_named(path: &Path, dir: &Path, name_ok: impl Fn(&str) -> bool) -> bool {
+    path.parent() == Some(dir)
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(name_ok)
+}
+
+fn is_claude_instruction_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("CLAUDE.md") || name.eq_ignore_ascii_case("CLAUDE.local.md")
 }
 
 /// Find matching agent config files in a directory.
@@ -48,12 +58,11 @@ fn find_agent_files(dir: &Path, filenames: &[&str]) -> Vec<PathBuf> {
             path.exists().then_some(path)
         })
         .collect();
-    if files.iter().any(|path| is_claude_instruction_path(path)) {
-        files.retain(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_none_or(|name| !is_agents_instruction_name(name))
-        });
+    if files
+        .iter()
+        .any(|path| path.parent() == Some(dir) && is_claude_instruction_path(path))
+    {
+        files.retain(|path| !is_direct_child_named(path, dir, is_agents_instruction_name));
     }
     files
 }
@@ -527,6 +536,30 @@ mod tests {
                 .iter()
                 .any(|f| f.to_string_lossy().contains(".claude/CLAUDE.md")),
             "Should discover .claude/CLAUDE.md, got: {files:?}"
+        );
+    }
+
+    #[test]
+    fn find_agent_files_keeps_root_agents_md_when_only_nested_claude_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("AGENTS.md"), "# Agents").unwrap();
+        let claude_dir = tmp.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+        fs::write(claude_dir.join("CLAUDE.md"), "# Nested Claude").unwrap();
+
+        let files = find_agent_files(tmp.path(), &CompatConfig::default().agent_filenames());
+        assert!(
+            files.iter().any(|f| f
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(is_agents_instruction_name)),
+            "root AGENTS.md must load next to .claude/CLAUDE.md, got: {files:?}"
+        );
+        assert!(
+            files
+                .iter()
+                .any(|f| f.to_string_lossy().contains(".claude/CLAUDE.md")),
+            ".claude/CLAUDE.md must still load, got: {files:?}"
         );
     }
 
