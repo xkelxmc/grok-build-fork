@@ -883,6 +883,70 @@ fn parse_prompt_result(
     }
 }
 
+/// PostToolUse stdout is a mixed stream (oxfmt progress, pretty-printed jq,
+/// maybe more than one object). Walk `{` candidates, parse **one JSON value
+/// to its end**, skip that span, keep going. Non-JSON is ignored — never
+/// forwarded as context (a progress line must not reach the model).
+fn collect_post_tool_use_json(stdout: &str) -> Vec<PostToolUseHookJson> {
+    let mut found = Vec::new();
+    let mut index = 0;
+    while let Some(rel) = stdout[index..].find('{') {
+        let start = index + rel;
+        let mut stream = serde_json::Deserializer::from_str(&stdout[start..])
+            .into_iter::<PostToolUseHookJson>();
+        match stream.next() {
+            Some(Ok(json)) => {
+                index = start + stream.byte_offset().max(1);
+                if post_tool_json_has_feedback(&json) {
+                    found.push(json);
+                }
+            }
+            Some(Err(_)) | None => index = start + 1,
+        }
+    }
+    found
+}
+
+fn post_tool_json_has_feedback(json: &PostToolUseHookJson) -> bool {
+    json.decision.is_some()
+        || json.hook_specific_output.as_ref().is_some_and(|output| {
+            output
+                .additional_context
+                .as_deref()
+                .is_some_and(|context| !context.trim().is_empty())
+                || output.updated_tool_output.is_some()
+                || output.updated_mcp_tool_output.is_some()
+        })
+}
+
+fn merge_post_tool_use_json(
+    jsons: Vec<PostToolUseHookJson>,
+    hook_name: &str,
+    health: HookHealth,
+) -> PostToolUseParse {
+    let mut combined = PostToolUseParse::default();
+    let mut blocks = Vec::new();
+    let mut contexts = Vec::new();
+    for json in jsons {
+        let parsed = post_tool_use_json_to_outcome(json, hook_name, health);
+        if combined.failure.is_none() {
+            combined.failure = parsed.failure;
+        }
+        if let Some(reason) = parsed.outcome.block_reason {
+            blocks.push(reason);
+        }
+        if let Some(context) = parsed.outcome.additional_context {
+            contexts.push(context);
+        }
+        if parsed.outcome.output_replacement.is_some() {
+            combined.outcome.output_replacement = parsed.outcome.output_replacement;
+        }
+    }
+    combined.outcome.block_reason = (!blocks.is_empty()).then(|| blocks.join("\n\n"));
+    combined.outcome.additional_context = (!contexts.is_empty()).then(|| contexts.join("\n\n"));
+    combined
+}
+
 fn parse_post_tool_use_result(
     stdout: &str,
     stderr: &str,
@@ -891,26 +955,14 @@ fn parse_post_tool_use_result(
     elapsed: Duration,
 ) -> (HookRunnerResult, Duration) {
     let health = HookHealth::from_success(exit_code == 0);
-    let trimmed = stdout.trim();
+    let parsed_json = collect_post_tool_use_json(stdout);
     let PostToolUseParse {
         mut outcome,
         failure,
-    } = if trimmed.is_empty() {
+    } = if parsed_json.is_empty() {
         PostToolUseParse::default()
     } else {
-        match serde_json::from_str::<PostToolUseHookJson>(trimmed) {
-            Ok(json) => post_tool_use_json_to_outcome(json, hook_name, health),
-            Err(err) => {
-                if trimmed.starts_with('{') {
-                    tracing::warn!(
-                        hook_name,
-                        error = %err,
-                        "post_tool_use hook stdout looks like JSON but failed to parse; ignoring"
-                    );
-                }
-                PostToolUseParse::default()
-            }
-        }
+        merge_post_tool_use_json(parsed_json, hook_name, health)
     };
 
     if exit_code == GATE_EXIT_CODE && outcome.block_reason.is_none() {
@@ -1903,6 +1955,59 @@ mod tests {
             value.as_str().map(str::len),
             Some(MAX_HOOK_OUTPUT_REPLACEMENT_CHARS),
             "the full ceiling-length replacement survives, unclipped"
+        );
+    }
+
+    fn post_tool_context(stdout: &str) -> Option<String> {
+        let (result, _) = parse_post_tool_use_result(stdout, "", 0, "fmt", Duration::ZERO);
+        post_tool_use_outcome(result).additional_context
+    }
+
+    #[test]
+    fn post_tool_use_parses_pretty_printed_json_after_progress() {
+        let stdout = "Finished in 13ms on 1 files using 16 threads.\n{\n  \"hookSpecificOutput\": {\n    \"hookEventName\": \"PostToolUse\",\n    \"additionalContext\": \"formatter reformatted the file\"\n  }\n}\n";
+        assert_eq!(
+            post_tool_context(stdout).as_deref(),
+            Some("formatter reformatted the file")
+        );
+    }
+
+    #[test]
+    fn post_tool_use_joins_concatenated_hook_json() {
+        let stdout = r#"{"hookSpecificOutput":{"additionalContext":"one"}}{"hookSpecificOutput":{"additionalContext":"two"}}"#;
+        assert_eq!(post_tool_context(stdout).as_deref(), Some("one\n\ntwo"));
+    }
+
+    #[test]
+    fn post_tool_use_keeps_hook_json_separated_by_junk() {
+        let stdout = "{\"hookSpecificOutput\":{\"additionalContext\":\"one\"}}\nFinished in 13ms\nnot json { oops\n{\"hookSpecificOutput\":{\"additionalContext\":\"two\"}}";
+        assert_eq!(post_tool_context(stdout).as_deref(), Some("one\n\ntwo"));
+    }
+
+    #[test]
+    fn post_tool_use_skips_noise_object_and_braces_in_strings() {
+        let stdout = r#"{"ok":true}{"noise":"not { a hook }"}{"hookSpecificOutput":{"additionalContext":"kept"}}"#;
+        assert_eq!(post_tool_context(stdout).as_deref(), Some("kept"));
+    }
+
+    #[test]
+    fn post_tool_use_progress_line_alone_is_not_context() {
+        assert_eq!(
+            post_tool_context("Finished in 13ms on 1 files using 16 threads."),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn post_tool_use_json_after_formatter_progress_line_is_still_context() {
+        let spec = make_shell_spec(
+            r#"printf '%s\n%s\n' 'Finished in 13ms on 1 files using 16 threads.' '{"hookSpecificOutput":{"additionalContext":"formatter reformatted the file"}}'"#,
+        );
+        let (result, _, _) =
+            run_command_hook(&spec, &make_envelope(), &make_ctx(), GateKind::PostTool).await;
+        assert_eq!(
+            post_tool_use_outcome(result).additional_context.as_deref(),
+            Some("formatter reformatted the file")
         );
     }
 
