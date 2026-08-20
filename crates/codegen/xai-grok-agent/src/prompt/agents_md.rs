@@ -1,10 +1,13 @@
 //! AGENTS.md / Claude.md / rules directory discovery and loading.
 //!
 //! Searches from cwd to repo root, plus `~/.grok/`. Claude-named memory
-//! files (`CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`) are also
-//! collected from directories *above* the git root, matching Claude Code's
-//! parent-directory walk, so a file like `~/repos/sz/CLAUDE.md` applies to
-//! every clone under that folder without being committed. Also discovers
+//! files (`Claude.md`, `CLAUDE.md`, `CLAUDE.local.md`, and when
+//! `compat.claude.agents` is on also `.claude/CLAUDE.md` and
+//! `.claude/CLAUDE.local.md`) are also collected from directories *above*
+//! the git root up to `$HOME` when the project lives under `$HOME`, so a
+//! file like `~/repos/sz/CLAUDE.md` applies to every clone under that
+//! folder without being committed. Ancestors above `$HOME` (`/tmp`, `/`)
+//! are skipped. Also discovers
 //! `*.md` files in rules directories: vendor-prefixed `.grok/rules/`,
 //! `.claude/rules/`, and `.cursor/rules/` in project directories, and a
 //! plain `rules/` directly under the vendor-qualified home-scope roots
@@ -347,8 +350,17 @@ async fn read_agents_config_with_roots(
 
     let mut project_roots = Vec::new();
     let extra_start = git_root.as_deref().unwrap_or(cwd.as_path());
+    let start_canonical = canonical_for_dedup(extra_start);
+    let stop_above = home_canonical
+        .as_ref()
+        .filter(|home| start_canonical == **home || start_canonical.starts_with(home));
     for dir in dirs_above(extra_start) {
         let canonical = canonical_for_dedup(&dir);
+        if let Some(home) = stop_above {
+            if canonical != *home && !canonical.starts_with(home) {
+                continue;
+            }
+        }
         if home_root_canonicals.iter().any(|home| home == &canonical) {
             continue;
         }
@@ -1658,6 +1670,44 @@ mod tests {
                 .filter(|content| **content == "HOME_VENDOR_CLAUDE")
                 .count(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn parent_claude_md_above_home_is_skipped_when_repo_is_under_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let grok_home = tmp.path().join("grok-home");
+        let home = tmp.path().join("home");
+        let repo = home.join("repos").join("sz").join("sparetire");
+        fs::create_dir_all(&grok_home).unwrap();
+        fs::create_dir_all(&repo).unwrap();
+        init_git_repo(&repo);
+        fs::write(tmp.path().join("CLAUDE.md"), "ABOVE_HOME_CLAUDE").unwrap();
+        fs::write(
+            home.join("repos").join("sz").join("CLAUDE.md"),
+            "SZ_PARENT_CLAUDE",
+        )
+        .unwrap();
+
+        let configs = read_agents_config_with_roots(
+            repo.to_str().unwrap(),
+            None,
+            CompatConfig::default(),
+            grok_home,
+            Some(home),
+        )
+        .await;
+        assert!(
+            configs
+                .iter()
+                .any(|config| config.content.contains("SZ_PARENT_CLAUDE")),
+            "CLAUDE.md under $HOME must still load, got: {configs:?}"
+        );
+        assert!(
+            configs
+                .iter()
+                .all(|config| !config.content.contains("ABOVE_HOME_CLAUDE")),
+            "CLAUDE.md above $HOME must not load: {configs:?}"
         );
     }
 }
