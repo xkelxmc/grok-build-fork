@@ -102,6 +102,12 @@ pub fn effective_compact(user_compact: bool, terminal_rows: u16) -> bool {
 }
 /// Every input [`AgentViewLayout::compute`] reads: the screen area, the appearance config, and the
 /// requested height of each row it stacks.
+///
+/// An optional pane at height 0 is omitted along with the gap above it.
+/// The prompt, the shortcuts bar and their gaps follow their own rules.
+/// On a frame with bottom padding a gap sits above the shortcuts bar. When the
+/// status row is on, that gap is between the status row and the shortcuts bar,
+/// and it is dropped if there is no spare row after the status row is placed.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AgentViewLayoutParams {
     pub area: Rect,
@@ -286,12 +292,16 @@ impl AgentViewLayout {
             .fold(0u16, u16::saturating_add);
         let reserved = pushed.saturating_add(shortcuts_height);
         let status_line_height = status_line_height.min(inner_area.height.saturating_sub(reserved));
-        let shortcuts_gap = u16::from(bottom_vpad > 0 && status_line_height == 0);
-        if shortcuts_gap > 0 {
-            constraints.push(Constraint::Length(shortcuts_gap));
-        }
+        let leftover_after_status = inner_area
+            .height
+            .saturating_sub(reserved.saturating_add(status_line_height));
+        let shortcuts_gap =
+            u16::from(bottom_vpad > 0 && (status_line_height == 0 || leftover_after_status > 0));
         if status_line_height > 0 {
             constraints.push(Constraint::Length(status_line_height));
+        }
+        if shortcuts_gap > 0 {
+            constraints.push(Constraint::Length(shortcuts_gap));
         }
         constraints.push(Constraint::Length(shortcuts_height));
         let chunks = Layout::vertical(constraints).split(inner_area);
@@ -393,9 +403,6 @@ impl AgentViewLayout {
         };
         let prompt = chunks[i];
         i += 1;
-        if shortcuts_gap > 0 {
-            i += 1;
-        }
         let status_line = if status_line_height > 0 {
             let r = chunks[i];
             i += 1;
@@ -403,6 +410,9 @@ impl AgentViewLayout {
         } else {
             Rect::default()
         };
+        if shortcuts_gap > 0 {
+            i += 1;
+        }
         let shortcuts = chunks[i];
         let scrollbar_x = area.right().saturating_sub(scrollbar_cfg.gap_right + 1);
         let timeline_width = if scrollbar_cfg.enabled {
@@ -2051,9 +2061,9 @@ mod tests {
             layout.prompt,
         );
         assert_eq!(
-            layout.status_line.bottom(),
+            layout.status_line.bottom() + 1,
             layout.shortcuts.y,
-            "the shortcuts bar starts where the row ends, got {:?} under row {:?}",
+            "a spare row sits between the status row and the shortcuts bar, got {:?} under row {:?}",
             layout.shortcuts,
             layout.status_line,
         );
@@ -2161,6 +2171,11 @@ mod tests {
             "a prompt at its budget leaves the status row whole, got {:?}",
             at_budget.status_line,
         );
+        assert_eq!(
+            at_budget.status_line.bottom() + 1,
+            at_budget.shortcuts.y,
+            "a spare row sits between the status row and the shortcuts bar",
+        );
         assert_eq!(at_budget.shortcuts.height, 1);
         assert_eq!(
             at_budget.scrollback.height, SCROLLBACK_MIN_ROWS,
@@ -2172,11 +2187,25 @@ mod tests {
             ..params
         });
         assert_eq!(
-            over_budget.status_line.height, 1,
-            "the row past the budget comes out of the status row, got {:?}",
+            over_budget.status_line.height, 2,
+            "the first row past the budget comes out of the gap under the status row, got {:?}",
             over_budget.status_line,
         );
+        assert_eq!(
+            over_budget.status_line.bottom(),
+            over_budget.shortcuts.y,
+            "the gap is gone before the status row shrinks",
+        );
         assert_eq!(over_budget.scrollback.height, SCROLLBACK_MIN_ROWS);
+        let over_budget_two = AgentViewLayout::compute(AgentViewLayoutParams {
+            prompt_height: budget + 2,
+            ..params
+        });
+        assert_eq!(
+            over_budget_two.status_line.height, 1,
+            "the second row past the budget comes out of the status row, got {:?}",
+            over_budget_two.status_line,
+        );
     }
     fn layout_with_rail(
         area: Rect,
