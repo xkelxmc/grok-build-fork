@@ -1,6 +1,10 @@
 //! AGENTS.md / Claude.md / rules directory discovery and loading.
 //!
-//! Searches from cwd to repo root, plus `~/.grok/`. Also discovers
+//! Searches from cwd to repo root, plus `~/.grok/`. Claude-named memory
+//! files (`CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`) are also
+//! collected from directories *above* the git root, matching Claude Code's
+//! parent-directory walk, so a file like `~/repos/sz/CLAUDE.md` applies to
+//! every clone under that folder without being committed. Also discovers
 //! `*.md` files in rules directories: vendor-prefixed `.grok/rules/`,
 //! `.claude/rules/`, and `.cursor/rules/` in project directories, and a
 //! plain `rules/` directly under the vendor-qualified home-scope roots
@@ -41,6 +45,32 @@ fn is_direct_child_named(path: &Path, dir: &Path, name_ok: impl Fn(&str) -> bool
 
 fn is_claude_instruction_name(name: &str) -> bool {
     name.eq_ignore_ascii_case("CLAUDE.md") || name.eq_ignore_ascii_case("CLAUDE.local.md")
+}
+
+/// Claude Code memory filenames for directories above the git root.
+///
+/// Top-level names are always recognized. `.claude/CLAUDE*.md` is gated on
+/// `compat.claude.agents`, same as in-repo discovery. AGENTS.md and rules
+/// directories are *not* included: Claude's parent walk is memory files only.
+fn claude_memory_filenames(compat: &CompatConfig, include_dot_claude: bool) -> Vec<&'static str> {
+    let mut names = vec!["Claude.md", "CLAUDE.md", "CLAUDE.local.md"];
+    if include_dot_claude && compat.claude.agents {
+        names.push(".claude/CLAUDE.md");
+        names.push(".claude/CLAUDE.local.md");
+    }
+    names
+}
+
+/// Ancestors of `path`, filesystem root first, not including `path` itself.
+fn dirs_above(path: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let mut current = path.parent();
+    while let Some(dir) = current {
+        dirs.push(dir.to_path_buf());
+        current = dir.parent();
+    }
+    dirs.reverse();
+    dirs
 }
 
 /// Find matching agent config files in a directory.
@@ -126,14 +156,14 @@ fn canonical_for_dedup(path: &Path) -> PathBuf {
 struct DiscoveryRoot {
     path: PathBuf,
     canonical_path: PathBuf,
-    scan_named_files: bool,
+    named_filenames: Vec<&'static str>,
     rules_subdirs: Vec<&'static str>,
 }
 
 fn add_discovery_root(
     roots: &mut Vec<DiscoveryRoot>,
     path: PathBuf,
-    scan_named_files: bool,
+    named_filenames: &[&'static str],
     rules_subdirs: &[&'static str],
 ) {
     let canonical_path = canonical_for_dedup(&path);
@@ -141,14 +171,18 @@ fn add_discovery_root(
         .iter_mut()
         .find(|root| root.canonical_path == canonical_path && root.rules_subdirs == rules_subdirs)
     {
-        root.scan_named_files |= scan_named_files;
+        for name in named_filenames {
+            if !root.named_filenames.contains(name) {
+                root.named_filenames.push(name);
+            }
+        }
         return;
     }
 
     roots.push(DiscoveryRoot {
         path,
         canonical_path,
-        scan_named_files,
+        named_filenames: named_filenames.to_vec(),
         rules_subdirs: rules_subdirs.to_vec(),
     });
 }
@@ -262,13 +296,22 @@ async fn read_agents_config_with_roots(
     let project_rules_dirs = compat.rules_dirs();
 
     let mut home_roots = Vec::new();
-    add_discovery_root(&mut home_roots, grok_home, true, HOME_RULES_DIRS);
-    if let Some(home) = home_dir {
+    add_discovery_root(
+        &mut home_roots,
+        grok_home,
+        &agent_filenames,
+        HOME_RULES_DIRS,
+    );
+    if let Some(home) = home_dir.as_ref() {
         if compat.claude.agents || compat.claude.rules {
             add_discovery_root(
                 &mut home_roots,
                 home.join(".claude"),
-                compat.claude.agents,
+                if compat.claude.agents {
+                    agent_filenames.as_slice()
+                } else {
+                    &[]
+                },
                 if compat.claude.rules {
                     HOME_RULES_DIRS
                 } else {
@@ -280,7 +323,11 @@ async fn read_agents_config_with_roots(
             add_discovery_root(
                 &mut home_roots,
                 home.join(".cursor"),
-                compat.cursor.agents,
+                if compat.cursor.agents {
+                    agent_filenames.as_slice()
+                } else {
+                    &[]
+                },
                 if compat.cursor.rules {
                     HOME_RULES_DIRS
                 } else {
@@ -290,12 +337,41 @@ async fn read_agents_config_with_roots(
         }
     }
 
+    let home_root_canonicals: Vec<PathBuf> = home_roots
+        .iter()
+        .map(|root| root.canonical_path.clone())
+        .collect();
+    let home_canonical = home_dir.as_ref().map(|dir| canonical_for_dedup(dir));
+    let claude_with_dot = claude_memory_filenames(&compat, true);
+    let claude_top_level = claude_memory_filenames(&compat, false);
+
     let mut project_roots = Vec::new();
+    let extra_start = git_root.as_deref().unwrap_or(cwd.as_path());
+    for dir in dirs_above(extra_start) {
+        let canonical = canonical_for_dedup(&dir);
+        if home_root_canonicals.iter().any(|home| home == &canonical) {
+            continue;
+        }
+        // `$HOME/.claude` is already a home root. Scanning `.claude/CLAUDE.md`
+        // from `$HOME` as a *project* file would re-tag that same path and
+        // move it after repo files. Use top-level names only at `$HOME`.
+        let names = if home_canonical.as_ref() == Some(&canonical)
+            || home_root_canonicals
+                .iter()
+                .any(|home| home == &canonical_for_dedup(&dir.join(".claude")))
+        {
+            claude_top_level.as_slice()
+        } else {
+            claude_with_dot.as_slice()
+        };
+        add_discovery_root(&mut project_roots, dir, names, &[]);
+    }
+
     for dir in project_sources.instruction_dirs() {
         add_discovery_root(
             &mut project_roots,
             dir.to_path_buf(),
-            true,
+            &agent_filenames,
             &project_rules_dirs,
         );
     }
@@ -310,8 +386,8 @@ async fn read_agents_config_with_roots(
         if is_project && !project_trusted {
             continue;
         }
-        if root.scan_named_files {
-            for path in find_agent_files(&root.path, &agent_filenames) {
+        if !root.named_filenames.is_empty() {
+            for path in find_agent_files(&root.path, &root.named_filenames) {
                 if !is_ignored(&path, gitignore.as_ref(), git_root.as_deref()) {
                     add_discovered_candidate(
                         &mut candidates,
@@ -835,6 +911,7 @@ mod tests {
             CompatConfig::default(),
             grok_home,
             None,
+            /*project_trusted*/ true,
         )
         .await;
         assert!(
@@ -1144,6 +1221,7 @@ mod tests {
             CompatConfig::default(),
             grok_home,
             None,
+            /*project_trusted*/ true,
         )
         .await;
         assert!(
@@ -1341,5 +1419,245 @@ mod tests {
 
         assert!(has_direct, "Direct CLAUDE.md should be found");
         assert!(has_subdir, ".claude/CLAUDE.md should be found");
+    }
+
+    // ── Parent-of-repo Claude memory files (Claude Code walk) ────────
+
+    #[tokio::test]
+    async fn parent_of_git_root_claude_md_loads_for_every_clone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let grok_home = tmp.path().join("grok-home");
+        let home = tmp.path().join("home");
+        let sz = tmp.path().join("sz");
+        let repo_a = sz.join("sparetire-a");
+        let repo_b = sz.join("sparetire-b");
+        fs::create_dir_all(&grok_home).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&repo_a).unwrap();
+        fs::create_dir_all(&repo_b).unwrap();
+        init_git_repo(&repo_a);
+        init_git_repo(&repo_b);
+        fs::write(sz.join("CLAUDE.md"), "SZ_PARENT_CLAUDE").unwrap();
+
+        for repo in [&repo_a, &repo_b] {
+            let configs = read_agents_config_with_roots(
+                repo.to_str().unwrap(),
+                None,
+                CompatConfig::default(),
+                grok_home.clone(),
+                Some(home.clone()),
+                /*project_trusted*/ true,
+            )
+            .await;
+            assert!(
+                configs
+                    .iter()
+                    .any(|config| config.content.contains("SZ_PARENT_CLAUDE")),
+                "parent CLAUDE.md must load for {}, got: {configs:?}",
+                repo.display()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn parent_of_git_root_agents_md_and_rules_do_not_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        let grok_home = tmp.path().join("grok-home");
+        let home = tmp.path().join("home");
+        let sz = tmp.path().join("sz");
+        let repo = sz.join("sparetire");
+        fs::create_dir_all(&grok_home).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(sz.join(".claude/rules")).unwrap();
+        fs::create_dir_all(&repo).unwrap();
+        init_git_repo(&repo);
+        fs::write(sz.join("AGENTS.md"), "SZ_PARENT_AGENTS").unwrap();
+        fs::write(sz.join(".claude/rules/org.md"), "SZ_PARENT_RULE").unwrap();
+        fs::write(sz.join("CLAUDE.md"), "SZ_PARENT_CLAUDE").unwrap();
+
+        let configs = read_agents_config_with_roots(
+            repo.to_str().unwrap(),
+            None,
+            CompatConfig::default(),
+            grok_home,
+            Some(home),
+            /*project_trusted*/ true,
+        )
+        .await;
+        assert!(
+            configs
+                .iter()
+                .any(|config| config.content.contains("SZ_PARENT_CLAUDE"))
+        );
+        assert!(
+            configs
+                .iter()
+                .all(|config| !config.content.contains("SZ_PARENT_AGENTS")),
+            "parent AGENTS.md is not a Claude memory file: {configs:?}"
+        );
+        assert!(
+            configs
+                .iter()
+                .all(|config| !config.content.contains("SZ_PARENT_RULE")),
+            "parent .claude/rules must not load above git root: {configs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn parent_claude_md_precedes_repo_claude_md() {
+        let tmp = tempfile::tempdir().unwrap();
+        let grok_home = tmp.path().join("grok-home");
+        let home = tmp.path().join("home");
+        let sz = tmp.path().join("sz");
+        let repo = sz.join("sparetire");
+        fs::create_dir_all(&grok_home).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&repo).unwrap();
+        init_git_repo(&repo);
+        fs::write(sz.join("CLAUDE.md"), "SZ_PARENT_CLAUDE").unwrap();
+        fs::write(repo.join("CLAUDE.md"), "REPO_CLAUDE").unwrap();
+
+        let configs = read_agents_config_with_roots(
+            repo.to_str().unwrap(),
+            None,
+            CompatConfig::default(),
+            grok_home,
+            Some(home),
+            /*project_trusted*/ true,
+        )
+        .await;
+        let contents: Vec<&str> = configs
+            .iter()
+            .map(|config| config.content.as_str())
+            .collect();
+        let parent = contents
+            .iter()
+            .position(|content| *content == "SZ_PARENT_CLAUDE")
+            .unwrap();
+        let repo_pos = contents
+            .iter()
+            .position(|content| *content == "REPO_CLAUDE")
+            .unwrap();
+        assert!(
+            parent < repo_pos,
+            "parent CLAUDE.md must appear before repo CLAUDE.md: {contents:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn parent_dot_claude_and_local_md_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        let grok_home = tmp.path().join("grok-home");
+        let home = tmp.path().join("home");
+        let sz = tmp.path().join("sz");
+        let repo = sz.join("sparetire");
+        fs::create_dir_all(&grok_home).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(sz.join(".claude")).unwrap();
+        fs::create_dir_all(&repo).unwrap();
+        init_git_repo(&repo);
+        fs::write(sz.join("CLAUDE.local.md"), "SZ_PARENT_LOCAL").unwrap();
+        fs::write(sz.join(".claude/CLAUDE.md"), "SZ_PARENT_DOT_CLAUDE").unwrap();
+
+        let configs = read_agents_config_with_roots(
+            repo.to_str().unwrap(),
+            None,
+            CompatConfig::default(),
+            grok_home,
+            Some(home),
+            /*project_trusted*/ true,
+        )
+        .await;
+        assert!(
+            configs
+                .iter()
+                .any(|config| config.content.contains("SZ_PARENT_LOCAL"))
+        );
+        assert!(
+            configs
+                .iter()
+                .any(|config| config.content.contains("SZ_PARENT_DOT_CLAUDE"))
+        );
+    }
+
+    #[tokio::test]
+    async fn parent_claude_md_loads_outside_git_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let grok_home = tmp.path().join("grok-home");
+        let home = tmp.path().join("home");
+        let sz = tmp.path().join("sz");
+        let dir = sz.join("not-a-repo");
+        fs::create_dir_all(&grok_home).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(sz.join("CLAUDE.md"), "SZ_PARENT_CLAUDE").unwrap();
+
+        let configs = read_agents_config_with_roots(
+            dir.to_str().unwrap(),
+            None,
+            CompatConfig::default(),
+            grok_home,
+            Some(home),
+            /*project_trusted*/ true,
+        )
+        .await;
+        assert!(
+            configs
+                .iter()
+                .any(|config| config.content.contains("SZ_PARENT_CLAUDE")),
+            "parent CLAUDE.md must load outside git too, got: {configs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn home_dot_claude_is_not_reordered_when_home_is_an_ancestor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let grok_home = tmp.path().join("grok-home");
+        let home = tmp.path().join("home");
+        let repo = home.join("projects").join("repo");
+        fs::create_dir_all(&grok_home).unwrap();
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::create_dir_all(&repo).unwrap();
+        init_git_repo(&repo);
+        fs::write(home.join(".claude/CLAUDE.md"), "HOME_VENDOR_CLAUDE").unwrap();
+        fs::write(home.join("CLAUDE.md"), "HOME_TOP_CLAUDE").unwrap();
+        fs::write(repo.join("CLAUDE.md"), "REPO_CLAUDE").unwrap();
+
+        let configs = read_agents_config_with_roots(
+            repo.to_str().unwrap(),
+            None,
+            CompatConfig::default(),
+            grok_home,
+            Some(home),
+            /*project_trusted*/ true,
+        )
+        .await;
+        let contents: Vec<&str> = configs
+            .iter()
+            .map(|config| config.content.as_str())
+            .collect();
+        let vendor = contents
+            .iter()
+            .position(|content| *content == "HOME_VENDOR_CLAUDE")
+            .unwrap();
+        let top = contents
+            .iter()
+            .position(|content| *content == "HOME_TOP_CLAUDE")
+            .unwrap();
+        let repo_pos = contents
+            .iter()
+            .position(|content| *content == "REPO_CLAUDE")
+            .unwrap();
+        assert!(
+            vendor < top && top < repo_pos,
+            "~/.claude/CLAUDE.md must stay a home file, ~/CLAUDE.md an ancestor, repo last: {contents:?}"
+        );
+        assert_eq!(
+            contents
+                .iter()
+                .filter(|content| **content == "HOME_VENDOR_CLAUDE")
+                .count(),
+            1
+        );
     }
 }

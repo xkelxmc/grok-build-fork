@@ -52,8 +52,9 @@ Home rules load first, in the table order, followed by project files from repo r
 Grok scans for project rules in this order:
 
 1. **Home rules**: `$GROK_HOME`, then enabled `~/.claude/` and `~/.cursor/` sources
-2. **Repo rules**: If inside a git repo, every directory from the repo root down to the current working directory (inclusive)
-3. **CWD-only**: If not inside a git repo, only the current working directory
+2. **Parent Claude memory**: directories above the git root (or above cwd when there is no git repo), for `CLAUDE.md`, `CLAUDE.local.md`, and `.claude/CLAUDE.md` only. This matches Claude Code: a file such as `~/repos/sz/CLAUDE.md` applies to every repository under that folder and is not part of any repo's git tree. Parent `AGENTS.md` and parent `.claude/rules/` are not loaded.
+3. **Repo rules**: If inside a git repo, every directory from the repo root down to the current working directory (inclusive)
+4. **CWD**: If not inside a git repo, the current working directory (plus parent Claude memory from step 2)
 
 ### Example
 
