@@ -568,10 +568,7 @@ pub(super) fn render_version_badge(
             ));
         }
         VersionBadgeMode::HeroFooter => {
-            spans.push(Span::styled(
-                FORK_LABEL,
-                Style::default().fg(theme.gray),
-            ));
+            spans.push(Span::styled(FORK_LABEL, Style::default().fg(theme.gray)));
         }
         VersionBadgeMode::HeroInline => {
             spans.push(Span::styled(
