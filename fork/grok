@@ -100,13 +100,28 @@ schedule_public_source_refresh() {
   if ! mkdir "$_sr_lock" 2>/dev/null; then
     return 0
   fi
-  (
-    _sr_rev=$(fetch_public_source_rev)
-    if is_source_rev "$_sr_rev"; then
-      write_public_source_cache "$(date +%s)" "$_sr_rev"
+  # nohup: the launcher `exec`s grok. A plain `( curl ) &` is in that
+  # session and dies on HUP, so the cache never moves off the old SHA
+  # and later launches never warn. Args: lock, url, cache path.
+  nohup sh -c '
+    set +e
+    _lock=$1
+    _url=$2
+    _cache=$3
+    trap "rmdir \"$_lock\" 2>/dev/null || true" EXIT
+    _rev=$(curl -fsS --max-time 8 "$_url" | tr -d " \t\r\n")
+    case $_rev in
+      *[!0-9a-fA-F]* | "") exit 0 ;;
+    esac
+    [ "${#_rev}" -eq 40 ] || exit 0
+    mkdir -p "$(dirname -- "$_cache")" 2>/dev/null || exit 0
+    _tmp="${_cache}.tmp.$$"
+    if ! printf "%s\n%s\n" "$(date +%s)" "$_rev" >"$_tmp" 2>/dev/null; then
+      rm -f "$_tmp"
+      exit 0
     fi
-    rmdir "$_sr_lock" 2>/dev/null || true
-  ) >/dev/null 2>&1 &
+    mv "$_tmp" "$_cache" 2>/dev/null || rm -f "$_tmp"
+  ' _ "$_sr_lock" "$SOURCE_REV_URL" "$PUBLIC_CACHE_FILE" </dev/null >/dev/null 2>&1 &
 }
 
 cached_public_source_rev() {

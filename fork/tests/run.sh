@@ -250,5 +250,33 @@ else
 fi
 assert_contains "missing binary mentions path" "$(cat "$WORKDIR/err")" "Fork binary is missing"
 
+# Stale cache + exec: refresh must finish while the binary is running.
+# A `( curl ) &` in the same session died on exec and left the cache
+# forever equal to the pin, so later launches never warned.
+printf '%s\n' "$NEWER_REV" >"$WORKDIR/public-SOURCE_REV"
+printf '0\n%s\n' "$PIN_REV" >"$PUBLIC_CACHE_FILE"
+cat >"$WORKDIR/fake-sleep" <<'EOF'
+#!/bin/sh
+sleep 1
+printf 'fake-sleep\n'
+EOF
+chmod +x "$WORKDIR/fake-sleep"
+_pub_url="file://$(CDPATH= cd -- "$WORKDIR" && pwd)/public-SOURCE_REV"
+GROK_FORK_BIN="$WORKDIR/fake-sleep" \
+  GROK_FORK_BASE_REV_FILE="$WORKDIR/base-source-rev" \
+  GROK_FORK_GIT_DIR="$WORKDIR/src-same" \
+  GROK_FORK_SKIP_NETWORK=0 \
+  GROK_FORK_SOURCE_REV_URL="$_pub_url" \
+  GROK_HOME="$GROK_HOME" \
+  GROK_FORK_CHECK_TTL=0 \
+  "$LAUNCHER" --version >"$WORKDIR/out" 2>"$WORKDIR/err" || true
+_got_rev=$(trim "$(sed -n '2p' "$PUBLIC_CACHE_FILE" 2>/dev/null || true)")
+assert_eq "stale-cache fetch survives exec and writes public SOURCE_REV" "$_got_rev" "$NEWER_REV"
+if grep -q 'Public grok-build SOURCE_REV' "$WORKDIR/err"; then
+  fail "first stale-cache launch does not wait on the network" "$(cat "$WORKDIR/err")"
+else
+  pass "first stale-cache launch does not wait on the network"
+fi
+
 printf '\n%s passed, %s failed\n' "$passed" "$failed"
 [ "$failed" -eq 0 ]
