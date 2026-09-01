@@ -4,10 +4,10 @@
 //! files (`Claude.md`, `CLAUDE.md`, `CLAUDE.local.md`, and when
 //! `compat.claude.agents` is on also `.claude/CLAUDE.md` and
 //! `.claude/CLAUDE.local.md`) are also collected from directories *above*
-//! the git root up to `$HOME` when the project lives under `$HOME`, so a
-//! file like `~/repos/sz/CLAUDE.md` applies to every clone under that
-//! folder without being committed. Ancestors above `$HOME` (`/tmp`, `/`)
-//! are skipped. Also discovers
+//! the git root that sit at or under `$HOME`, so a file like
+//! `~/repos/sz/CLAUDE.md` applies to every clone under that folder without
+//! being committed. Ancestors outside `$HOME` (`/tmp`, `/`) are skipped
+//! even when the project itself is outside `$HOME`. Also discovers
 //! `*.md` files in rules directories: vendor-prefixed `.grok/rules/`,
 //! `.claude/rules/`, and `.cursor/rules/` in project directories, and a
 //! plain `rules/` directly under the vendor-qualified home-scope roots
@@ -154,6 +154,10 @@ fn collect_md_files_recursive(rules_dir: &Path) -> Vec<PathBuf> {
 
 fn canonical_for_dedup(path: &Path) -> PathBuf {
     dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn is_at_or_under_home(canonical: &Path, home: &Path) -> bool {
+    canonical == home || canonical.starts_with(home)
 }
 
 struct DiscoveryRoot {
@@ -350,16 +354,13 @@ async fn read_agents_config_with_roots(
 
     let mut project_roots = Vec::new();
     let extra_start = git_root.as_deref().unwrap_or(cwd.as_path());
-    let start_canonical = canonical_for_dedup(extra_start);
-    let stop_above = home_canonical
-        .as_ref()
-        .filter(|home| start_canonical == **home || start_canonical.starts_with(home));
     for dir in dirs_above(extra_start) {
         let canonical = canonical_for_dedup(&dir);
-        if let Some(home) = stop_above {
-            if canonical != *home && !canonical.starts_with(home) {
-                continue;
-            }
+        if home_canonical
+            .as_ref()
+            .is_some_and(|home| !is_at_or_under_home(&canonical, home))
+        {
+            continue;
         }
         if home_root_canonicals.iter().any(|home| home == &canonical) {
             continue;
@@ -1440,7 +1441,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let grok_home = tmp.path().join("grok-home");
         let home = tmp.path().join("home");
-        let sz = tmp.path().join("sz");
+        let sz = home.join("sz");
         let repo_a = sz.join("sparetire-a");
         let repo_b = sz.join("sparetire-b");
         fs::create_dir_all(&grok_home).unwrap();
@@ -1476,7 +1477,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let grok_home = tmp.path().join("grok-home");
         let home = tmp.path().join("home");
-        let sz = tmp.path().join("sz");
+        let sz = home.join("sz");
         let repo = sz.join("sparetire");
         fs::create_dir_all(&grok_home).unwrap();
         fs::create_dir_all(&home).unwrap();
@@ -1520,7 +1521,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let grok_home = tmp.path().join("grok-home");
         let home = tmp.path().join("home");
-        let sz = tmp.path().join("sz");
+        let sz = home.join("sz");
         let repo = sz.join("sparetire");
         fs::create_dir_all(&grok_home).unwrap();
         fs::create_dir_all(&home).unwrap();
@@ -1561,7 +1562,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let grok_home = tmp.path().join("grok-home");
         let home = tmp.path().join("home");
-        let sz = tmp.path().join("sz");
+        let sz = home.join("sz");
         let repo = sz.join("sparetire");
         fs::create_dir_all(&grok_home).unwrap();
         fs::create_dir_all(&home).unwrap();
@@ -1597,7 +1598,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let grok_home = tmp.path().join("grok-home");
         let home = tmp.path().join("home");
-        let sz = tmp.path().join("sz");
+        let sz = home.join("sz");
         let dir = sz.join("not-a-repo");
         fs::create_dir_all(&grok_home).unwrap();
         fs::create_dir_all(&home).unwrap();
@@ -1708,6 +1709,37 @@ mod tests {
                 .iter()
                 .all(|config| !config.content.contains("ABOVE_HOME_CLAUDE")),
             "CLAUDE.md above $HOME must not load: {configs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn parent_claude_md_outside_home_is_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let grok_home = tmp.path().join("grok-home");
+        let home = tmp.path().join("home");
+        let work = tmp.path().join("work");
+        let repo = work.join("scratch");
+        fs::create_dir_all(&grok_home).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&repo).unwrap();
+        init_git_repo(&repo);
+        fs::write(work.join("CLAUDE.md"), "OUTSIDE_HOME_PARENT").unwrap();
+        fs::write(tmp.path().join("CLAUDE.md"), "TMP_ROOT_CLAUDE").unwrap();
+
+        let configs = read_agents_config_with_roots(
+            repo.to_str().unwrap(),
+            None,
+            CompatConfig::default(),
+            grok_home,
+            Some(home),
+        )
+        .await;
+        assert!(
+            configs.iter().all(|config| {
+                !config.content.contains("OUTSIDE_HOME_PARENT")
+                    && !config.content.contains("TMP_ROOT_CLAUDE")
+            }),
+            "parent CLAUDE.md outside $HOME must not load: {configs:?}"
         );
     }
 }
