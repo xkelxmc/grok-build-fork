@@ -943,7 +943,8 @@ fn merge_post_tool_use_json(
         }
     }
     combined.outcome.block_reason = (!blocks.is_empty()).then(|| blocks.join("\n\n"));
-    combined.outcome.additional_context = (!contexts.is_empty()).then(|| contexts.join("\n\n"));
+    combined.outcome.additional_context = (!contexts.is_empty())
+        .then(|| clip_text(&contexts.join("\n\n"), MAX_HOOK_FEEDBACK_CHARS));
     combined
 }
 
@@ -1976,6 +1977,20 @@ mod tests {
     fn post_tool_use_joins_concatenated_hook_json() {
         let stdout = r#"{"hookSpecificOutput":{"additionalContext":"one"}}{"hookSpecificOutput":{"additionalContext":"two"}}"#;
         assert_eq!(post_tool_context(stdout).as_deref(), Some("one\n\ntwo"));
+    }
+
+    #[test]
+    fn post_tool_use_clips_joined_context_to_feedback_cap() {
+        let piece = "é".repeat(MAX_HOOK_FEEDBACK_CHARS);
+        let stdout = format!(
+            r#"{{"hookSpecificOutput":{{"additionalContext":"{piece}"}}}}{{"hookSpecificOutput":{{"additionalContext":"{piece}"}}}}"#
+        );
+        let context = post_tool_context(&stdout).expect("joined context");
+        assert_eq!(
+            context,
+            clip_text(&format!("{piece}\n\n{piece}"), MAX_HOOK_FEEDBACK_CHARS),
+            "joined additionalContext must clip after merge"
+        );
     }
 
     #[test]

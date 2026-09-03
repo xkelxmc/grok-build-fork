@@ -52,7 +52,7 @@ Home rules load first, in the table order, followed by project files from repo r
 Grok scans for project rules in this order:
 
 1. **Home rules**: `$GROK_HOME`, then enabled `~/.claude/` and `~/.cursor/` sources
-2. **Parent Claude memory**: directories above the git root (or above cwd when there is no git repo) that sit at or under `$HOME`. Names: `Claude.md`, `CLAUDE.md`, `CLAUDE.local.md`. When Claude agents compatibility is on, also `.claude/CLAUDE.md` and `.claude/CLAUDE.local.md`. A file such as `~/repos/sz/CLAUDE.md` applies to every repository under that folder and is not part of any repo's git tree. Parent `AGENTS.md`, parent `.claude/rules/`, and ancestors outside `$HOME` (`/tmp/CLAUDE.md`, `/CLAUDE.md`) are not loaded, including when the project itself is outside `$HOME`.
+2. **Parent Claude memory**: directories above the git root (or above cwd when there is no git repo) that sit at or under `$HOME`. Names: `Claude.md`, `CLAUDE.md`, `CLAUDE.local.md`. When Claude agents compatibility is on, also `.claude/CLAUDE.md` and `.claude/CLAUDE.local.md`. A file such as `~/repos/sz/CLAUDE.md` applies to every repository under that folder and is not part of any repo's git tree. Parent `AGENTS.md`, parent `.claude/rules/`, and ancestors outside `$HOME` (`/tmp/CLAUDE.md`, `/CLAUDE.md`) are not loaded, including when the project itself is outside `$HOME`. If `$HOME` is unknown, this parent walk does not run.
 3. **Repo rules**: If inside a git repo, every directory from the repo root down to the current working directory (inclusive)
 4. **CWD**: If not inside a git repo, the current working directory (plus parent Claude memory from step 2)
 

@@ -339,6 +339,10 @@ async fn test_should_auto_compact_disabled_master_switch() {
                 result.is_none(),
                 "auto_compact=false must not trigger at 95%"
             );
+            assert!(
+                actor.check_auto_compact_needed().await.is_none(),
+                "auto_compact=false must not pre-sample compact"
+            );
         })
         .await;
 }

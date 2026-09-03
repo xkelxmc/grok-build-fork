@@ -7,7 +7,8 @@
 //! the git root that sit at or under `$HOME`, so a file like
 //! `~/repos/sz/CLAUDE.md` applies to every clone under that folder without
 //! being committed. Ancestors outside `$HOME` (`/tmp`, `/`) are skipped
-//! even when the project itself is outside `$HOME`. Also discovers
+//! even when the project itself is outside `$HOME`. If `$HOME` is unknown,
+//! the parent walk does not run. Also discovers
 //! `*.md` files in rules directories: vendor-prefixed `.grok/rules/`,
 //! `.claude/rules/`, and `.cursor/rules/` in project directories, and a
 //! plain `rules/` directly under the vendor-qualified home-scope roots
@@ -354,30 +355,29 @@ async fn read_agents_config_with_roots(
 
     let mut project_roots = Vec::new();
     let extra_start = git_root.as_deref().unwrap_or(cwd.as_path());
-    for dir in dirs_above(extra_start) {
-        let canonical = canonical_for_dedup(&dir);
-        if home_canonical
-            .as_ref()
-            .is_some_and(|home| !is_at_or_under_home(&canonical, home))
-        {
-            continue;
+    if let Some(home) = home_canonical.as_ref() {
+        for dir in dirs_above(extra_start) {
+            let canonical = canonical_for_dedup(&dir);
+            if !is_at_or_under_home(&canonical, home) {
+                continue;
+            }
+            if home_root_canonicals.iter().any(|root| root == &canonical) {
+                continue;
+            }
+            // `$HOME/.claude` is already a home root. Scanning `.claude/CLAUDE.md`
+            // from `$HOME` as a *project* file would re-tag that same path and
+            // move it after repo files. Use top-level names only at `$HOME`.
+            let names = if home_canonical.as_ref() == Some(&canonical)
+                || home_root_canonicals
+                    .iter()
+                    .any(|root| root == &canonical_for_dedup(&dir.join(".claude")))
+            {
+                claude_top_level.as_slice()
+            } else {
+                claude_with_dot.as_slice()
+            };
+            add_discovery_root(&mut project_roots, dir, names, &[]);
         }
-        if home_root_canonicals.iter().any(|home| home == &canonical) {
-            continue;
-        }
-        // `$HOME/.claude` is already a home root. Scanning `.claude/CLAUDE.md`
-        // from `$HOME` as a *project* file would re-tag that same path and
-        // move it after repo files. Use top-level names only at `$HOME`.
-        let names = if home_canonical.as_ref() == Some(&canonical)
-            || home_root_canonicals
-                .iter()
-                .any(|home| home == &canonical_for_dedup(&dir.join(".claude")))
-        {
-            claude_top_level.as_slice()
-        } else {
-            claude_with_dot.as_slice()
-        };
-        add_discovery_root(&mut project_roots, dir, names, &[]);
     }
 
     for dir in project_sources.instruction_dirs() {
@@ -1740,6 +1740,35 @@ mod tests {
                     && !config.content.contains("TMP_ROOT_CLAUDE")
             }),
             "parent CLAUDE.md outside $HOME must not load: {configs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn parent_claude_md_skipped_when_home_dir_is_unknown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let grok_home = tmp.path().join("grok-home");
+        let work = tmp.path().join("work");
+        let repo = work.join("scratch");
+        fs::create_dir_all(&grok_home).unwrap();
+        fs::create_dir_all(&repo).unwrap();
+        init_git_repo(&repo);
+        fs::write(work.join("CLAUDE.md"), "UNKNOWN_HOME_PARENT").unwrap();
+        fs::write(tmp.path().join("CLAUDE.md"), "TMP_ROOT_CLAUDE").unwrap();
+
+        let configs = read_agents_config_with_roots(
+            repo.to_str().unwrap(),
+            None,
+            CompatConfig::default(),
+            grok_home,
+            None,
+        )
+        .await;
+        assert!(
+            configs.iter().all(|config| {
+                !config.content.contains("UNKNOWN_HOME_PARENT")
+                    && !config.content.contains("TMP_ROOT_CLAUDE")
+            }),
+            "parent walk must not run without $HOME: {configs:?}"
         );
     }
 }

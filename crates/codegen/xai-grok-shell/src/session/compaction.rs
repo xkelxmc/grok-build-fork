@@ -1941,9 +1941,6 @@ impl SessionActor {
     /// Uses `get_estimated_total_tokens()` (exact prior count plus a byte-estimate of items since last response) so tool results are accounted for.
     /// Returns `None` when `is_flushing`.
     pub(crate) async fn check_auto_compact_needed(&self) -> Option<AutoCompactTriggerInfo> {
-        if !self.compaction.enabled.get() {
-            return None;
-        }
         if self
             .memory
             .is_flushing
@@ -1961,6 +1958,9 @@ impl SessionActor {
         let estimated_total = self.chat_state_handle.get_estimated_total_tokens().await;
         self.signals_handle()
             .update_context_usage(estimated_total, cw);
+        if !self.compaction.enabled.get() {
+            return None;
+        }
         if self.compaction.is_suppressed() {
             return None;
         }

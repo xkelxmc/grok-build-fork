@@ -270,7 +270,13 @@ GROK_FORK_BIN="$WORKDIR/fake-sleep" \
   GROK_HOME="$GROK_HOME" \
   GROK_FORK_CHECK_TTL=0 \
   "$LAUNCHER" --version >"$WORKDIR/out" 2>"$WORKDIR/err" || true
-_got_rev=$(trim "$(sed -n '2p' "$PUBLIC_CACHE_FILE" 2>/dev/null || true)")
+_got_rev=
+_deadline=$(($(date +%s) + 5))
+while [ "$(date +%s)" -lt "$_deadline" ]; do
+  _got_rev=$(trim "$(sed -n '2p' "$PUBLIC_CACHE_FILE" 2>/dev/null || true)")
+  [ "$_got_rev" = "$NEWER_REV" ] && break
+  sleep 0.1
+done
 assert_eq "stale-cache fetch survives exec and writes public SOURCE_REV" "$_got_rev" "$NEWER_REV"
 if grep -q 'Public grok-build SOURCE_REV' "$WORKDIR/err"; then
   fail "first stale-cache launch does not wait on the network" "$(cat "$WORKDIR/err")"
