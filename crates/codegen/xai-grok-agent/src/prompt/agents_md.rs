@@ -1696,6 +1696,7 @@ mod tests {
             CompatConfig::default(),
             grok_home,
             Some(home),
+            /*project_trusted*/ true,
         )
         .await;
         assert!(
@@ -1732,6 +1733,7 @@ mod tests {
             CompatConfig::default(),
             grok_home,
             Some(home),
+            /*project_trusted*/ true,
         )
         .await;
         assert!(
@@ -1761,6 +1763,7 @@ mod tests {
             CompatConfig::default(),
             grok_home,
             None,
+            /*project_trusted*/ true,
         )
         .await;
         assert!(
