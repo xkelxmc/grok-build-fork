@@ -1828,23 +1828,6 @@ fn parses_auto_compact_threshold_percent() {
     assert_eq!(cfg.session.auto_compact_threshold_percent, Some(75));
 }
 #[test]
-fn parses_auto_compact_master_switch() {
-    let raw_config: toml::Value = toml::from_str(
-        r#"
-            [session]
-            auto_compact = false
-            "#,
-    )
-    .unwrap();
-    let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-    assert_eq!(cfg.session.auto_compact, Some(false));
-}
-#[test]
-fn auto_compact_defaults_when_not_specified() {
-    let cfg = Config::default();
-    assert_eq!(cfg.session.auto_compact, None);
-}
-#[test]
 fn compaction_mode_precedence_env_over_config_over_remote_over_default() {
     use xai_chat_state::CompactionMode;
     assert_eq!(

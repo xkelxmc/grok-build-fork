@@ -218,10 +218,6 @@ pub(crate) struct SubagentSpawnContext {
     /// Lazy because the subagent may be assigned a different model from the parent (via `[subagents.models]` or `AgentDefinition.model`).
     /// Call [`Self::resolve_auto_compact_threshold_percent`] once the subagent's `effective_sampling_config.model` is known.
     pub auto_compact_threshold_tiers: AutoCompactThresholdTiers,
-    /// `[session] auto_compact` / `GROK_AUTO_COMPACT`, captured from the parent.
-    pub auto_compact_enabled: bool,
-    /// Parent's hunk tracker handle: cheap Clone, backed by an mpsc channel to the parent's HunkTrackerActor.
-    /// Subagent edits are attributed to the same hunk tracker so the parent sees all file changes.
     pub hunk_tracker_handle: HunkTrackerHandle,
     /// Parent's hunk-tracking gate.
     /// Inherited so a disabled parent's subagent also skips the per-event forward instead of paying it into a noop handle.

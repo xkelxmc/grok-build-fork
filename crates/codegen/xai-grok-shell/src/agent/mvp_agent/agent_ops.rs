@@ -4214,10 +4214,6 @@ impl MvpAgent {
                 model.map(|e| &e.info),
             )
         };
-        let auto_compact_enabled = {
-            let cfg = self.cfg.borrow();
-            crate::util::config::resolve_auto_compact_enabled(&cfg)
-        };
         let system_prompt_label = {
             let cfg = self.cfg.borrow();
             let models = self.models_manager.models();
@@ -4671,7 +4667,6 @@ impl MvpAgent {
                     startup_hints,
                     client_type,
                     auto_compact_threshold_percent,
-                    auto_compact_enabled,
                     system_prompt_label,
                     compaction_mode,
                     compaction_verbatim_input,

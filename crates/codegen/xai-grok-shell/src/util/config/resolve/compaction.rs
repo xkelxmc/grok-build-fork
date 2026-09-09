@@ -88,40 +88,6 @@ pub(crate) fn resolve_auto_compact_threshold_percent_from_tiers(
         .unwrap_or(DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT)
 }
 
-/// Env override for `[session] auto_compact`. Parsed as bool; garbage falls through.
-pub(crate) const ENV_AUTO_COMPACT: &str = "GROK_AUTO_COMPACT";
-
-/// Resolve whether automatic compaction is enabled.
-///
-/// Precedence: env `GROK_AUTO_COMPACT` > user TOML `[session].auto_compact` >
-/// default `true`. Manual `/compact` ignores this.
-pub(crate) fn resolve_auto_compact_enabled(cfg: &crate::agent::config::Config) -> bool {
-    resolve_auto_compact_enabled_from(cfg.session.auto_compact)
-}
-
-pub(crate) fn resolve_auto_compact_enabled_from(user: Option<bool>) -> bool {
-    if let Ok(raw) = std::env::var(ENV_AUTO_COMPACT) {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "0" | "false" | "off" | "no" => return false,
-            "1" | "true" | "on" | "yes" => return true,
-            _ => {}
-        }
-    }
-    user.unwrap_or(true)
-}
-
-#[cfg(test)]
-mod auto_compact_enabled_tests {
-    use super::resolve_auto_compact_enabled_from as resolve;
-
-    #[test]
-    fn default_is_on() {
-        assert!(resolve(None));
-        assert!(resolve(Some(true)));
-        assert!(!resolve(Some(false)));
-    }
-}
-
 /// Fleet p99 of successful compactions is ~181s (≈225s at 400K+ input).
 /// So 300s clears the legit tail with margin while cutting a runaway from the ~600s deadline.
 pub const DEFAULT_COMPACTION_WALL_CLOCK_BUDGET_SECS: u64 = 300;

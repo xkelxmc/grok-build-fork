@@ -1557,14 +1557,6 @@ pub struct SessionConfig {
     /// Read this field via the resolver, not directly, to honor the full precedence chain (env, per-model, remote, default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_compact_threshold_percent: Option<u8>,
-    /// Master switch for automatic compaction. `None` means unset (default
-    /// on). `Some(false)` disables threshold, overflow-preflight, and
-    /// compact-on-error triggers. Manual `/compact` is unaffected.
-    ///
-    /// Env `GROK_AUTO_COMPACT` overrides this (`0`/`false`/`off` or
-    /// `1`/`true`/`on`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_compact: Option<bool>,
     /// When enabled, the session will parse .envrc in the workspace directory and inject the environment variables into bash commands.
     /// Defaults to `true` when unset.
     /// `Option<bool>` so `None` round-trips as absent on disk (managed config wins over default).
