@@ -25,11 +25,22 @@ use std::sync::LazyLock;
 mod versions;
 use crate::types::schema::GrokIntegerSchema;
 /// Configuration for the ReadFile tool, stored as `Params<ReadFileParams>` in Resources.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReadFileParams {
-    #[serde(default)]
+    /// Fork default is on so Claude `paths:` / Cursor `globs` inject on read.
+    #[serde(default = "default_cursor_rules_on_read")]
     pub cursor_rules_on_read: bool,
+}
+fn default_cursor_rules_on_read() -> bool {
+    true
+}
+impl Default for ReadFileParams {
+    fn default() -> Self {
+        Self {
+            cursor_rules_on_read: true,
+        }
+    }
 }
 crate::register_resource!("grok_build", "ReadFile", ReadFileParams);
 /// Internal version discriminant for read_file. `read_file` has cross-cutting version divergence:

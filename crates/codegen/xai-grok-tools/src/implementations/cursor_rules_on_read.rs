@@ -1,4 +1,10 @@
-//! Cursor project-rule reminders attached after successful file reads.
+//! Cursor / Claude / Grok project-rule reminders attached after successful file reads.
+//!
+//! Cursor: recursive `.cursor/rules/**` with `globs` / `alwaysApply`.
+//! Claude: recursive `.claude/rules/**` with `paths:` (braces and `!`
+//! negation). Grok: recursive `.grok/rules/**` with the same frontmatter.
+//! Path-scoped rules are injected here; always-on rules (no `paths` / no
+//! `globs`) stay on the session-start AGENTS.md path.
 
 use std::collections::HashSet;
 use std::collections::hash_map::Entry;
@@ -45,6 +51,8 @@ struct CursorRuleFrontmatter {
     #[serde(default)]
     globs: Option<GlobField>,
     #[serde(default)]
+    paths: Option<GlobField>,
+    #[serde(default)]
     description: Option<String>,
 }
 
@@ -58,25 +66,43 @@ enum GlobField {
 impl GlobField {
     fn into_patterns(self) -> Vec<String> {
         match self {
-            Self::String(value) => value
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned)
-                .collect(),
+            Self::String(value) => split_glob_list(&value),
             Self::List(values) => values
                 .into_iter()
-                .flat_map(|value| {
-                    value
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_owned)
-                        .collect::<Vec<_>>()
-                })
+                .flat_map(|value| split_glob_list(&value))
                 .collect(),
         }
     }
+
+    fn is_non_empty(&self) -> bool {
+        match self {
+            Self::String(value) => split_glob_list(value).iter().any(|part| !part.is_empty()),
+            Self::List(values) => values.iter().any(|value| !value.trim().is_empty()),
+        }
+    }
+}
+
+fn split_glob_list(value: &str) -> Vec<String> {
+    split_top_level_commas(value)
+        .into_iter()
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// True when a rule file has `paths:` or `globs:` and must not be dumped at
+/// session start. Always-on files (no path frontmatter) stay on that path.
+pub fn is_path_scoped_rule(content: &str) -> bool {
+    let content = content.trim_start();
+    let Some((yaml, _)) = split_frontmatter(content) else {
+        return false;
+    };
+    let Some(parsed) = parse_frontmatter(yaml) else {
+        return false;
+    };
+    parsed.globs.as_ref().is_some_and(GlobField::is_non_empty)
+        || parsed.paths.as_ref().is_some_and(GlobField::is_non_empty)
 }
 
 pub async fn append_cursor_rules_for_read(
@@ -232,9 +258,18 @@ async fn normalize_existing_paths(
     normalized
 }
 
+const RULES_VENDOR_DIRS: &[&str] = &[".cursor", ".claude", ".grok"];
+
 async fn scan_scope_dir(scope_dir: &Path) -> Vec<ParsedCursorRule> {
-    let rules_dir = scope_dir.join(".cursor").join("rules");
-    let Ok(metadata) = tokio::fs::metadata(&rules_dir).await else {
+    let mut rules = Vec::new();
+    for vendor in RULES_VENDOR_DIRS {
+        rules.extend(scan_rules_dir(scope_dir, &scope_dir.join(vendor).join("rules")).await);
+    }
+    rules
+}
+
+async fn scan_rules_dir(scope_dir: &Path, rules_dir: &Path) -> Vec<ParsedCursorRule> {
+    let Ok(metadata) = tokio::fs::metadata(rules_dir).await else {
         return Vec::new();
     };
     if !metadata.is_dir() {
@@ -242,7 +277,7 @@ async fn scan_scope_dir(scope_dir: &Path) -> Vec<ParsedCursorRule> {
     }
 
     let mut rules = Vec::new();
-    let mut stack = vec![rules_dir];
+    let mut stack = vec![rules_dir.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(mut read_dir) = tokio::fs::read_dir(&dir).await else {
             continue;
@@ -253,7 +288,7 @@ async fn scan_scope_dir(scope_dir: &Path) -> Vec<ParsedCursorRule> {
             let path = entry.path();
             match entry.file_type().await {
                 Ok(file_type) if file_type.is_dir() => dirs.push(path),
-                Ok(file_type) if file_type.is_file() && is_rule_file(&path) => files.push(path),
+                Ok(file_type) if !file_type.is_dir() && is_rule_file(&path) => files.push(path),
                 _ => {}
             }
         }
@@ -286,7 +321,8 @@ fn parse_rule(scope_dir: PathBuf, full_path: PathBuf, content: &str) -> ParsedCu
     let kind = match parsed {
         Some(fm) if fm.always_apply => CursorRuleKind::Global,
         Some(fm) => {
-            let globs = fm.globs.map(GlobField::into_patterns).unwrap_or_default();
+            let mut globs = fm.globs.map(GlobField::into_patterns).unwrap_or_default();
+            globs.extend(fm.paths.map(GlobField::into_patterns).unwrap_or_default());
             if !globs.is_empty() {
                 CursorRuleKind::FileGlobbed(globs)
             } else if fm
@@ -329,6 +365,10 @@ fn parse_frontmatter(yaml: &str) -> Option<CursorRuleFrontmatter> {
             }
             "globs" if !value.is_empty() => {
                 parsed.globs = Some(GlobField::String(value.to_owned()));
+                saw_field = true;
+            }
+            "paths" if !value.is_empty() => {
+                parsed.paths = Some(GlobField::String(value.to_owned()));
                 saw_field = true;
             }
             "description" if !value.is_empty() => {
@@ -383,14 +423,93 @@ fn file_globs_match(scope_dir: &Path, read_path: &Path, globs: &[String]) -> boo
         .map(path_to_unix)
         .unwrap_or_default();
 
-    globs.iter().any(|glob| {
+    let mut positives = Vec::new();
+    let mut negatives = Vec::new();
+    for glob in globs {
         let normalized = glob.replace('\\', "/");
-        if Path::new(&normalized).is_absolute() {
-            return glob_matches(&normalized, &absolute_read_path);
+        let (negated, pattern) = match normalized.strip_prefix('!') {
+            Some(rest) => (true, rest.to_owned()),
+            None => (false, normalized),
+        };
+        for expanded in expand_braces(&pattern) {
+            if negated {
+                negatives.push(expanded);
+            } else {
+                positives.push(expanded);
+            }
         }
-        glob_matches(&normalized, &relative_candidate)
-            || glob_matches(&normalize_relative_glob(&normalized), &relative_candidate)
-    })
+    }
+
+    let matches_one = |pattern: &str| {
+        if Path::new(pattern).is_absolute() {
+            glob_matches(pattern, &absolute_read_path)
+        } else {
+            glob_matches(pattern, &relative_candidate)
+                || glob_matches(&normalize_relative_glob(pattern), &relative_candidate)
+        }
+    };
+
+    let included = if positives.is_empty() {
+        !negatives.is_empty()
+    } else {
+        positives.iter().any(|pattern| matches_one(pattern))
+    };
+    included && !negatives.iter().any(|pattern| matches_one(pattern))
+}
+
+fn expand_braces(pattern: &str) -> Vec<String> {
+    let Some((open, close)) = find_brace_group(pattern) else {
+        return vec![pattern.to_owned()];
+    };
+    let prefix = &pattern[..open];
+    let inner = &pattern[open + 1..close];
+    let suffix = &pattern[close + 1..];
+    let mut out = Vec::new();
+    for alt in split_top_level_commas(inner) {
+        out.extend(expand_braces(&format!("{prefix}{alt}{suffix}")));
+    }
+    if out.is_empty() {
+        vec![pattern.to_owned()]
+    } else {
+        out
+    }
+}
+
+fn find_brace_group(pattern: &str) -> Option<(usize, usize)> {
+    let open = pattern.find('{')?;
+    let mut depth = 0usize;
+    for (offset, ch) in pattern[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some((open, open + offset));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn split_top_level_commas(value: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    for (index, ch) in value.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(&value[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&value[start..]);
+    parts
 }
 
 fn normalize_relative_glob(glob: &str) -> String {
@@ -763,5 +882,147 @@ mod tests {
                 .starts_with("The following rule files are relevant to the files you just read:")
         );
         assert!(!reminder.contains("cursor rule files"));
+    }
+
+    #[tokio::test]
+    async fn claude_paths_rule_matches_nested_file_once() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        let rules_dir = root.join(".claude/rules/coding");
+        std::fs::create_dir_all(&rules_dir).unwrap();
+        std::fs::write(
+            rules_dir.join("db-schemas-and-migrations.md"),
+            "---\npaths:\n  - 'packages/db-driver/prisma/**'\n  - 'packages/db-driver/migrations/**'\n---\nUse Prisma rules.",
+        )
+        .unwrap();
+        let prisma = root.join("packages/db-driver/prisma/schema/patient/patient.prisma");
+        std::fs::create_dir_all(prisma.parent().unwrap()).unwrap();
+        std::fs::write(&prisma, "model Patient {}\n").unwrap();
+
+        let shared = resources(root);
+        let first = cursor_rule_reminder_for_read_inner(shared.clone(), root, &prisma).await;
+        assert!(
+            first
+                .as_deref()
+                .is_some_and(|text| text.contains("Use Prisma rules.")),
+            "first prisma read should inject the Claude paths rule, got: {first:?}"
+        );
+
+        let second = cursor_rule_reminder_for_read_inner(shared, root, &prisma).await;
+        assert!(second.is_none(), "rule reminders are deduped per session");
+    }
+
+    #[tokio::test]
+    async fn claude_always_on_rule_is_not_read_scoped() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        let rules_dir = root.join(".claude/rules/repository");
+        std::fs::create_dir_all(&rules_dir).unwrap();
+        std::fs::write(rules_dir.join("catches.md"), "# Catches\nAlways-on duty.\n").unwrap();
+        std::fs::write(root.join("main.ts"), "export const x = 1;\n").unwrap();
+
+        let reminder =
+            cursor_rule_reminder_for_read_inner(resources(root), root, &root.join("main.ts")).await;
+        assert!(
+            reminder.is_none(),
+            "Claude files without paths/globs stay on session start"
+        );
+    }
+
+    #[tokio::test]
+    async fn claude_paths_brace_and_negation() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        let rules_dir = root.join(".claude/rules/core");
+        std::fs::create_dir_all(&rules_dir).unwrap();
+        std::fs::write(
+            rules_dir.join("quality-policy.md"),
+            "---\npaths:\n  - 'packages/**/*.{ts,tsx}'\n  - '!packages/fhir-*/**'\n---\nQuality policy.",
+        )
+        .unwrap();
+        let allowed = root.join("packages/db/src/index.ts");
+        let excluded = root.join("packages/fhir-r4/src/index.ts");
+        std::fs::create_dir_all(allowed.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(excluded.parent().unwrap()).unwrap();
+        std::fs::write(&allowed, "export {}\n").unwrap();
+        std::fs::write(&excluded, "export {}\n").unwrap();
+
+        let miss = cursor_rule_reminder_for_read_inner(resources(root), root, &excluded).await;
+        assert!(
+            miss.is_none(),
+            "negation should exclude packages/fhir-*, got: {miss:?}"
+        );
+        let hit = cursor_rule_reminder_for_read_inner(resources(root), root, &allowed).await;
+        assert!(
+            hit.as_deref()
+                .is_some_and(|text| text.contains("Quality policy.")),
+            "brace path should match packages/db, got: {hit:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_read_file_params_enable_on_read_injection() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        std::fs::create_dir_all(root.join(".claude/rules")).unwrap();
+        std::fs::write(
+            root.join(".claude/rules/rust.md"),
+            "---\npaths: '*.rs'\n---\nUse Rust rules.",
+        )
+        .unwrap();
+        std::fs::write(root.join("main.rs"), "fn main() {}\n").unwrap();
+
+        let mut resources = Resources::new();
+        resources.insert(Cwd(root.to_path_buf()));
+        resources.insert(FileSystem(Arc::new(LocalFs)));
+        resources.insert(NotificationHandle(ToolNotificationHandle::noop()));
+        resources.insert(TemplateRenderer::new(
+            [(ToolKind::Search, "grep".to_owned())]
+                .into_iter()
+                .collect(),
+            Default::default(),
+        ));
+        resources.insert(Params(ReadFileParams::default()));
+        let shared = resources.into_shared();
+        let input = ReadFileInput {
+            path: "main.rs".to_owned(),
+            offset: None,
+            limit: None,
+            pages: None,
+            format: None,
+        };
+
+        let first = xai_tool_runtime::Tool::run(&GrokReadFileTool, test_ctx(shared), input)
+            .await
+            .unwrap();
+        let ReadFileOutput::FileContent(first) = first else {
+            panic!("expected file content");
+        };
+        assert!(first.content.contains("Use Rust rules."));
+        assert!(ReadFileParams::default().cursor_rules_on_read);
+    }
+
+    #[test]
+    fn is_path_scoped_rule_detects_paths_and_globs() {
+        assert!(is_path_scoped_rule(
+            "---\npaths:\n  - 'packages/db-driver/prisma/**'\n---\nBody."
+        ));
+        assert!(is_path_scoped_rule("---\nglobs: *.rs\n---\nBody."));
+        assert!(!is_path_scoped_rule("# Catches\nAlways-on."));
+        assert!(!is_path_scoped_rule(
+            "---\ndescription: fetch me\n---\nBody."
+        ));
+    }
+
+    #[test]
+    fn expand_braces_splits_extension_groups() {
+        assert_eq!(
+            expand_braces("packages/**/*.{ts,tsx}"),
+            vec![
+                "packages/**/*.ts".to_owned(),
+                "packages/**/*.tsx".to_owned()
+            ]
+        );
+        assert_eq!(expand_braces("plain/**"), vec!["plain/**".to_owned()]);
     }
 }
