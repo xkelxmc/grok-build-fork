@@ -1,6 +1,10 @@
 #!/bin/bash
 # One-line Grok status. Context bar matches ~/.claude/statusline.sh 1:1.
 # Live path: ~/.grok/statusline.sh -> this file.
+#
+# Grok re-runs this every 300ms during a turn and never cancels a run already
+# going, so anything spawned here is the delay of the context number. One jq,
+# no bc, cached node -v.
 set -f
 input=$(cat)
 
@@ -32,11 +36,21 @@ progress_bar() {
     echo "$bar"
 }
 
-cwd=$(echo "$input" | jq -r '.workspace.repo_root // .workspace.current_dir // .cwd // ""')
-used_pct_raw=$(echo "$input" | jq -r '.context_window.used_percentage // 0')
-used_pct=${used_pct_raw%.*}
-[ -z "$used_pct" ] && used_pct=0
-ctx_tokens=$(echo "$input" | jq -r '.context_window.context_tokens // 0')
+eval "$(printf '%s\n' "$input" | jq -r '
+  "cwd=\(.workspace.repo_root // .workspace.current_dir // .cwd // "" | @sh)",
+  "ctx_tokens=\((.context_window.context_tokens // "") | @sh)",
+  "ctx_size=\((.context_window.context_window_size // "") | @sh)",
+  "used_pct_raw=\((.context_window.used_percentage // "") | @sh)"
+')"
+
+used_pct=0
+if [ -n "$ctx_tokens" ] && [ -n "$ctx_size" ] && [ "$ctx_size" -gt 0 ]; then
+    used_pct=$((ctx_tokens * 100 / ctx_size))
+    [ "$used_pct" -gt 100 ] && used_pct=100
+elif [ -n "$used_pct_raw" ]; then
+    used_pct=${used_pct_raw%.*}
+    [ -z "$used_pct" ] && used_pct=0
+fi
 
 pkg_manager=""
 if [ -f "$cwd/bun.lockb" ] || [ -f "$cwd/bun.lock" ]; then
@@ -50,19 +64,26 @@ elif [ -f "$cwd/package-lock.json" ]; then
 fi
 
 node_ver=""
-if command -v node >/dev/null 2>&1; then
+node_cache="${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/grok-statusline-node-ver"
+if [ -f "$node_cache" ]; then
+    node_ver=$(cat "$node_cache")
+elif command -v node >/dev/null 2>&1; then
     node_ver=$(node -v)
+    mkdir -p "$(dirname "$node_cache")"
+    printf '%s\n' "$node_ver" >"$node_cache"
 fi
 
 parts=()
 [ -n "$pkg_manager" ] && parts+=("📦 $pkg_manager")
 [ -n "$node_ver" ] && parts+=("⬢ \033[90m${node_ver}\033[0m")
 
-if [ "$used_pct" -gt 0 ] || [ "$ctx_tokens" -gt 0 ]; then
-    if [ "$ctx_tokens" -ge 1000 ]; then
-        tokens_fmt=$(echo "scale=1; $ctx_tokens / 1000" | bc)k
-    else
+if [ "$used_pct" -gt 0 ] || { [ -n "$ctx_tokens" ] && [ "$ctx_tokens" -gt 0 ]; }; then
+    if [ -n "$ctx_tokens" ] && [ "$ctx_tokens" -ge 1000 ]; then
+        tokens_fmt="$((ctx_tokens / 1000)).$(( (ctx_tokens % 1000) / 100 ))k"
+    elif [ -n "$ctx_tokens" ]; then
         tokens_fmt=$ctx_tokens
+    else
+        tokens_fmt="?"
     fi
     bar=$(progress_bar "$used_pct" 20)
     parts+=("🧠 ${bar_color}${used_pct}%\033[0m $(printf '%b' "$bar") ${bar_color}${tokens_fmt}\033[0m")

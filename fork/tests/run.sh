@@ -284,5 +284,23 @@ else
   pass "first stale-cache launch does not wait on the network"
 fi
 
+# Status line: one jq, percent from live tokens/window, no node spawn on cache hit.
+STATUSLINE="$FORK_DIR/statusline.sh"
+if command -v jq >/dev/null 2>&1 && [ -x "$STATUSLINE" ]; then
+  _sl_cache="$WORKDIR/cache"
+  mkdir -p "$_sl_cache"
+  printf 'v22.0.0\n' >"$_sl_cache/grok-statusline-node-ver"
+  _sl_payload='{"workspace":{"current_dir":"/tmp/demo"},"context_window":{"used_percentage":25,"context_tokens":40000,"context_window_size":200000}}'
+  _sl_out=$(printf '%s\n' "$_sl_payload" | XDG_CACHE_HOME="$_sl_cache" PATH="/usr/bin:/bin" "$STATUSLINE")
+  assert_contains "statusline percent is live tokens/window, not the rounded field" "$_sl_out" "20%"
+  assert_contains "statusline shows live token count" "$_sl_out" "40.0k"
+  case $_sl_out in
+    *25%*) fail "statusline must not prefer the rounded used_percentage" "$_sl_out" ;;
+    *) pass "statusline does not prefer the rounded used_percentage" ;;
+  esac
+else
+  pass "statusline tests skipped (jq or script missing)"
+fi
+
 printf '\n%s passed, %s failed\n' "$passed" "$failed"
 [ "$failed" -eq 0 ]
