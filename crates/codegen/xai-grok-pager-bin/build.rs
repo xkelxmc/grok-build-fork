@@ -35,7 +35,7 @@ fn main() {
         .or_else(|_| std::env::var("CARGO_PKG_VERSION"))
         .unwrap_or_else(|_| "0.0.0".to_string());
 
-    println!("cargo:rustc-env=VERSION_WITH_COMMIT={version} ({commit})");
+    println!("cargo:rustc-env=VERSION_WITH_COMMIT={version} ({commit}) [fork]");
 
     // grove-projfs imports `ProjectedFSLib.dll`, absent until `Client-ProjFS` is
     // enabled; a load-time import kills startup with STATUS_DLL_NOT_FOUND. Link

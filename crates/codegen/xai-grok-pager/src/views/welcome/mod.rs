@@ -552,7 +552,7 @@ pub(super) fn render_version_badge(
         spans.push(sep);
     }
 
-    let channel = xai_grok_update::channel_label();
+    const FORK_LABEL: &str = "[fork]";
     match &mode {
         VersionBadgeMode::Full { .. } => {
             spans.push(Span::styled(
@@ -562,17 +562,12 @@ pub(super) fn render_version_badge(
                     .add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::styled(
-                format!("{}{}", xai_grok_version::VERSION, channel),
+                format!("{} {FORK_LABEL}", xai_grok_version::VERSION),
                 Style::default().fg(theme.gray),
             ));
         }
         VersionBadgeMode::HeroFooter => {
-            if !channel.is_empty() {
-                spans.push(Span::styled(
-                    channel.trim(),
-                    Style::default().fg(theme.gray),
-                ));
-            }
+            spans.push(Span::styled(FORK_LABEL, Style::default().fg(theme.gray)));
         }
         VersionBadgeMode::HeroInline => {
             spans.push(Span::styled(
@@ -582,7 +577,7 @@ pub(super) fn render_version_badge(
                     .add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::styled(
-                xai_grok_version::VERSION,
+                format!("{} {FORK_LABEL}", xai_grok_version::VERSION),
                 Style::default().fg(theme.gray),
             ));
         }
@@ -2719,8 +2714,17 @@ mod tests {
             );
         }
         assert!(full.contains("Grok Build"), "full badge: {full:?}");
+        assert!(full.contains("[fork]"), "full badge shows fork: {full:?}");
         assert!(inline.contains("Grok Build"), "inline badge: {inline:?}");
+        assert!(
+            inline.contains("[fork]"),
+            "inline badge shows fork: {inline:?}"
+        );
         assert!(footer.contains("acme"), "footer keeps the team: {footer:?}");
+        assert!(
+            footer.contains("[fork]"),
+            "footer badge shows fork: {footer:?}"
+        );
         assert!(
             !footer.ends_with('\u{2502}'),
             "footer must not end on a separator: {footer:?}"
