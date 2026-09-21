@@ -23,7 +23,7 @@ Grok checks for these filenames (in this order) within each directory:
 - `AGENT.md`
 - `AGENTS.md`
 
-Grok loads every matching file in a directory, so a folder that contains both `AGENTS.md` and `CLAUDE.md` contributes both. On case-insensitive filesystems, names that resolve to the same file (such as `Agents.md` and `AGENTS.md`) are deduplicated and counted once. `Claude.md`, `CLAUDE.md`, and `CLAUDE.local.md` are supported for compatibility with Claude Code workflows. When Claude compatibility is enabled (the default), Grok also scans your home-level `~/.claude/` directory for these filenames and, at each directory level, checks `.claude/CLAUDE.md` and `.claude/CLAUDE.local.md` -- the locations Claude Code uses for project memory. With Cursor compatibility enabled, the home-level `~/.cursor/` directory is scanned the same way.
+If a directory has a Claude-named file (`Claude.md`, `CLAUDE.md`, or `CLAUDE.local.md`) as a direct child, sibling `AGENTS.md` / `Agents.md` / `AGENT.md` in that same directory are dropped so the same handbook is not injected twice. Nested `.claude/CLAUDE.md` does not suppress a top-level `AGENTS.md`. Home `~/.grok/AGENTS.md` is never dropped this way. On case-insensitive filesystems, names that resolve to the same file (such as `Agents.md` and `AGENTS.md`) are deduplicated and counted once. `Claude.md`, `CLAUDE.md`, and `CLAUDE.local.md` are supported for compatibility with Claude Code workflows. When Claude compatibility is enabled (the default), Grok also scans your home-level `~/.claude/` directory for these filenames and, at each directory level, checks `.claude/CLAUDE.md` and `.claude/CLAUDE.local.md` -- the locations Claude Code uses for project memory. With Cursor compatibility enabled, the home-level `~/.cursor/` directory is scanned the same way.
 
 ### Rules Directories
 
@@ -51,7 +51,7 @@ Home rules load first, in the table order, followed by project files from repo r
 extra_rule_dirs = ["~/team-rules", "/opt/company/grok-rules"]
 ```
 
-Every `*.md` directly inside a listed directory is loaded as a rule (subdirectories are not scanned), in every project and regardless of folder trust, the repository's `.gitignore`, or the compatibility cells; the model receives them as user rules and `grok inspect` lists them as `global`. Entries must be absolute or start with `~/`; a relative or missing entry loads nothing. `/import-claude` writes your existing `~/.claude/rules/` here so it keeps loading after the Claude compatibility scan is turned off. The vendor `rules` cells control both home and project rules independently of the corresponding `agents` cells. Claude's `agents` cell controls named files under `~/.claude/` and project `<dir>/.claude/CLAUDE*.md`; generic top-level names such as `Claude.md`, `CLAUDE.md`, and `CLAUDE.local.md` remain recognized. See [Configuration](05-configuration.md#harness-compatibility).
+Every `*.md` directly inside a listed `[paths] extra_rule_dirs` directory is loaded as a rule (subdirectories are not scanned), in every project and regardless of folder trust, the repository's `.gitignore`, or the compatibility cells; the model receives them as user rules and `grok inspect` lists them as `global`. Entries must be absolute or start with `~/`; a relative or missing entry loads nothing. `/import-claude` writes your existing `~/.claude/rules/` here so it keeps loading after the Claude compatibility scan is turned off. Built-in vendor rules directories (`.grok/rules/`, `.claude/rules/`, `.cursor/rules/`, and the matching home `rules/` folders) are scanned recursively so nested files such as `.claude/rules/core/quality-policy.md` load. Path-scoped files (`paths:` / `globs:` frontmatter) are skipped at session start and injected when a matching file is read. The vendor `rules` cells control both home and project rules independently of the corresponding `agents` cells. Claude's `agents` cell controls named files under `~/.claude/` and project `<dir>/.claude/CLAUDE*.md`; generic top-level names such as `Claude.md`, `CLAUDE.md`, and `CLAUDE.local.md` remain recognized. See [Configuration](05-configuration.md#harness-compatibility).
 
 ---
 
@@ -60,8 +60,9 @@ Every `*.md` directly inside a listed directory is loaded as a rule (subdirector
 Grok scans for project rules in this order:
 
 1. **Home rules**: `$GROK_HOME`, then enabled `~/.claude/` and `~/.cursor/` sources, then `[paths] extra_rule_dirs`
-2. **Repo rules**: If inside a git repo, every directory from the repo root down to the current working directory (inclusive)
-3. **CWD-only**: If not inside a git repo, only the current working directory
+2. **Parent Claude memory**: directories above the git root (or above cwd when there is no git repo) that sit at or under `$HOME`. Names: `Claude.md`, `CLAUDE.md`, `CLAUDE.local.md`. When Claude agents compatibility is on, also `.claude/CLAUDE.md` and `.claude/CLAUDE.local.md`. A file such as `~/repos/sz/CLAUDE.md` applies to every repository under that folder and is not part of any repo's git tree. Parent `AGENTS.md`, parent `.claude/rules/`, and ancestors outside `$HOME` (`/tmp/CLAUDE.md`, `/CLAUDE.md`) are not loaded, including when the project itself is outside `$HOME`. If `$HOME` is unknown, this parent walk does not run.
+3. **Repo rules**: If inside a git repo, every directory from the repo root down to the current working directory (inclusive)
+4. **CWD**: If not inside a git repo, the current working directory (plus parent Claude memory from step 2)
 
 ### Example
 

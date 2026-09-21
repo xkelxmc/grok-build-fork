@@ -288,12 +288,16 @@ impl AgentViewLayout {
             .fold(0u16, u16::saturating_add);
         let reserved = pushed.saturating_add(shortcuts_height);
         let status_line_height = status_line_height.min(inner_area.height.saturating_sub(reserved));
-        let shortcuts_gap = u16::from(bottom_vpad > 0 && status_line_height == 0);
-        if shortcuts_gap > 0 {
-            constraints.push(Constraint::Length(shortcuts_gap));
-        }
+        let leftover_after_status = inner_area
+            .height
+            .saturating_sub(reserved.saturating_add(status_line_height));
+        let shortcuts_gap =
+            u16::from(bottom_vpad > 0 && (status_line_height == 0 || leftover_after_status > 0));
         if status_line_height > 0 {
             constraints.push(Constraint::Length(status_line_height));
+        }
+        if shortcuts_gap > 0 {
+            constraints.push(Constraint::Length(shortcuts_gap));
         }
         constraints.push(Constraint::Length(shortcuts_height));
         let chunks = Layout::vertical(constraints).split(inner_area);
@@ -370,14 +374,14 @@ impl AgentViewLayout {
             Rect::default()
         };
         let prompt = chunks.next().unwrap_or_default();
-        if shortcuts_gap > 0 {
-            chunks.next();
-        }
         let status_line = if status_line_height > 0 {
             chunks.next().unwrap_or_default()
         } else {
             Rect::default()
         };
+        if shortcuts_gap > 0 {
+            chunks.next();
+        }
         let shortcuts = chunks.next().unwrap_or_default();
         let scrollbar_x = area.right().saturating_sub(scrollbar_cfg.gap_right + 1);
         let timeline_width = if scrollbar_cfg.enabled {
@@ -2026,9 +2030,9 @@ mod tests {
             layout.prompt,
         );
         assert_eq!(
-            layout.status_line.bottom(),
+            layout.status_line.bottom() + 1,
             layout.shortcuts.y,
-            "the shortcuts bar starts where the row ends, got {:?} under row {:?}",
+            "a spare row sits between the status row and the shortcuts bar, got {:?} under row {:?}",
             layout.shortcuts,
             layout.status_line,
         );
