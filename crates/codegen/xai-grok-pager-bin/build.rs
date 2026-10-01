@@ -27,7 +27,7 @@ fn main() {
     let version = std::env::var("GROK_VERSION")
         .or_else(|_| std::env::var("CARGO_PKG_VERSION"))
         .unwrap_or_else(|_| "0.0.0".to_string());
-    println!("cargo:rustc-env=VERSION_WITH_COMMIT={version} ({commit})");
+    println!("cargo:rustc-env=VERSION_WITH_COMMIT={version} ({commit}) [fork]");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
         && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
     {
